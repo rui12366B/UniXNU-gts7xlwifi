@@ -1,0 +1,17 @@
+/dts-v1/;
+/include/ "sm8250.dtsi"
+
+/ {
+    model = "Samsung Galaxy Tab S7+ Wi-Fi (SM-T970)";
+    compatible = "samsung,gts7xlwifi", "qcom,sm8250";
+
+    // REQUIRED: one contiguous XNU range. Measured DRAM has three banks and
+    // 0xc0000000..0xd0000000 holds UEFI state; see ../board-t970/hardware.json.
+    memory@0 {
+        device_type = "memory";
+        reg = <0 0 0 0>;
+    };
+};
+
+// Set CPU status, reserved memory, peripheral wiring, and firmware inputs
+// from this board's hardware documentation.
