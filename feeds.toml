@@ -1,0 +1,6 @@
+[[source]]
+name = "sm8250"
+kind = "soc"
+git = "https://github.com/FFT-infra/UniXNU-sm8250-common"
+# Shared SM8250 layer also used by alioth/munch/kebab; reviewed 2026-10-30.
+commit = "166235ec2480ff0992627b7aafa15c65ce6b4efa"
