@@ -1,0 +1,152 @@
+--- a/osfmk/arm/pmap/pmap.c
++++ b/osfmk/arm/pmap/pmap.c
+@@ -2684,8 +2684,96 @@
+ /*
+  * Initialize the count of available pages. No lock needed here,
+  * as this code is called while kernel boot up is single threaded.
++ */
++/*
++ * gts7xlwifi: DRAM ranges inside [first_avail, avail_end) that the VM must never hand out, from the ADT's
++ * /chosen/t970-dram-holes (pairs of u64 base, size; page aligned). XNU 10063 keeps every managed page in one linear
++ * vm_pages array (a page's address is its index plus vm_first_phys_ppnum), so pmap_next_page() still returns the hole's
++ * pages in order; vm_page_startup() and vm_get_delayed_page() mark them vmp_error, the bit of retired pages, and never
++ * free them (osfmk/vm/vm_resident.c). Skipping them here instead broke that mapping and hung the kernel before its
++ * console (v26, v54).
+  */
++#define T970_DRAM_HOLES_MAX 16
++static pmap_paddr_t t970_hole_base[T970_DRAM_HOLES_MAX], t970_hole_end[T970_DRAM_HOLES_MAX];
++static unsigned int t970_hole_count;
++
+ static void
++t970_read_dram_holes(void)
++{
++	DTEntry chosen;
++	void const *prop = NULL;
++	unsigned int size = 0;
++	if (SecureDTLookupEntry(NULL, "/chosen", &chosen) != kSuccess ||
++	    SecureDTGetProperty(chosen, "t970-dram-holes", &prop, &size) != kSuccess || !prop || (size % 16)) {
++		return;
++	}
++	for (unsigned int i = 0; i < size / 16 && t970_hole_count < T970_DRAM_HOLES_MAX; i++) {
++		uint64_t base, len;
++		memcpy(&base, (const uint8_t *)prop + 16 * i, 8);
++		memcpy(&len, (const uint8_t *)prop + 16 * i + 8, 8);
++		if (!len || (base & PAGE_MASK) || (len & PAGE_MASK) || base + len < base) {
++			continue;
++		}
++		t970_hole_base[t970_hole_count] = base;
++		t970_hole_end[t970_hole_count] = base + len;
++		t970_hole_count++;
++	}
++}
++
++bool t970_pmap_page_in_hole(ppnum_t pn);
++bool
++t970_pmap_page_in_hole(ppnum_t pn)
++{
++	const pmap_paddr_t pa = ptoa(pn);
++	for (unsigned int i = 0; i < t970_hole_count; i++) {
++		if (pa >= t970_hole_base[i] && pa < t970_hole_end[i]) {
++			return true;
++		}
++	}
++	return false;
++}
++
++/*
++ * gts7xlwifi: boot-arg t970-memtest=1 writes and reads back every managed page at or above 0x200000000 before the VM
++ * owns any of it (CPU only, no device DMA), to tell protected or bad DRAM from a device writing to a wrong address.
++ */
++uint64_t t970_memtest_result[6];   /* low, high, pages, bad words, first bad PA, done */
++
++static void
++t970_memtest(void)
++{
++	uint64_t enable = 0;
++	if (!PE_parse_boot_argn("t970-memtest", &enable, sizeof(enable)) || !enable) {
++		return;
++	}
++	const pmap_paddr_t lo = first_avail > 0x200000000ULL ? first_avail : 0x200000000ULL, hi = avail_end;
++	uint64_t pages = 0, bad = 0, first_bad = 0;
++	t970_memtest_result[0] = lo;
++	t970_memtest_result[1] = hi;
++	for (int pass = 0; pass < 2; pass++) {
++		for (pmap_paddr_t pa = lo; pa < hi; pa += PAGE_SIZE) {
++			if (t970_pmap_page_in_hole((ppnum_t)atop(pa))) {
++				continue;
++			}
++			volatile uint64_t *w = (volatile uint64_t *)phystokv(pa);
++			for (unsigned int i = 0; i < PAGE_SIZE / 8; i++) {
++				const uint64_t want = (pa + 8 * i) ^ 0xa5c35a3cf00f0ff0ULL;
++				if (pass == 0) {
++					w[i] = want;
++				} else if (w[i] != want && !bad++) {
++					first_bad = pa + 8 * i;
++				}
++			}
++			pages += pass;
++		}
++	}
++	t970_memtest_result[2] = pages;
++	t970_memtest_result[3] = bad;
++	t970_memtest_result[4] = first_bad;
++	t970_memtest_result[5] = 1;
++}
++
++static void
+ initialize_ram_ranges(void)
+ {
+ 	pmap_paddr_t first = first_avail;
+@@ -2696,6 +2784,8 @@
+ 	assert(end == (end & ~PAGE_MASK));
+ 	avail_page_count = atop(end - first);
+ 
++	t970_read_dram_holes();
++	t970_memtest();
+ 	need_ram_ranges_init = false;
+ }
+ 
+--- a/osfmk/vm/vm_resident.c
++++ b/osfmk/vm/vm_resident.c
+@@ -659,6 +659,9 @@
+ /*
+  * Get and initialize the next delayed page.
+  */
++/* gts7xlwifi: pages of a /chosen/t970-dram-holes range (osfmk/arm/pmap/pmap.c), kept in vm_pages but never freed. */
++extern bool t970_pmap_page_in_hole(ppnum_t pn);
++
+ static vm_page_t
+ vm_get_delayed_page(int grab_options)
+ {
+@@ -669,6 +672,7 @@
+ 	 * Get a new page if we have one.
+ 	 */
+ 	vm_free_page_lock();
++t970_next:
+ 	if (vm_delayed_count == 0) {
+ 		vm_free_page_unlock();
+ 		return NULL;
+@@ -695,6 +699,11 @@
+ 	vm_page_init(p, pnum, FALSE);
+ 	++vm_pages_count;
+ 	++vm_page_pages;
++	if (t970_pmap_page_in_hole(pnum)) {
++		/* gts7xlwifi: keep the array linear but never hand the page out; take the next one. */
++		p->vmp_error = TRUE;
++		goto t970_next;   /* still holding the free page lock */
++	}
+ 	vm_free_page_unlock();
+ 
+ 	/*
+@@ -1583,6 +1592,11 @@
+ #endif
+ 		++vm_pages_count;
+ 		vm_page_init(&vm_pages[i], phys_page, FALSE);
++		if (t970_pmap_page_in_hole(phys_page)) {
++			/* gts7xlwifi: in vm_pages, never freed (the release loop below skips vmp_error pages). */
++			vm_pages[i].vmp_error = TRUE;
++			continue;
++		}
+ 		if (fill) {
+ 			fillPage(phys_page, fillval);
+ 		}

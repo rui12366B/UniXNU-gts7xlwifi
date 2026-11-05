@@ -1,0 +1,28 @@
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -372,6 +372,25 @@
+ 	PE_init_platform(FALSE, args); /* Get platform expert set up */
+ 	boot_progress_init();
+ 
++	/*
++	 * gts7xlwifi: DarwinBoot hands over only its first-fit window inside the firmware's 1 GiB
++	 * conventional run (0x200000000+0x40000000), and every byte it loaded (kernel, args, ADT,
++	 * trust cache) lies below TopOfKernelData. The DRAM above the window up to t970-dram-end is
++	 * plain RAM: the live Android/TWRP /proc/iomem lists 0x10ad00000..0x27fffffff as System RAM
++	 * and the board's static reserved-memory has nothing there. The firmware marks it reserved
++	 * only because it was never validated, and the firmware lives in the boot partition, which
++	 * this project does not write, so the kernel extends its own managed range instead.
++	 */
++	{
++		uint64_t dram_end = 0;
++		if (PE_parse_boot_argn("t970-dram-end", &dram_end, sizeof(dram_end)) &&
++		    dram_end <= 0x280000000ULL && !(dram_end & 0x1fffffULL) &&
++		    dram_end > args->physBase + args->memSize) {
++			args->memSize = dram_end - args->physBase;
++			args->memSizeActual = args->memSize;
++		}
++	}
++
+ #if __arm64__
+ 	configure_timer_apple_regs();
+ 	wfe_timeout_configure();

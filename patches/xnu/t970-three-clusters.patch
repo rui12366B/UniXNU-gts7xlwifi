@@ -1,0 +1,75 @@
+--- a/pexpert/pexpert/arm64/board_config.h
++++ b/pexpert/pexpert/arm64/board_config.h
+@@ -164,7 +164,8 @@
+  * without cluster-type has a single cluster, as before.
+  */
+ #undef MAX_CPU_CLUSTERS
+-#define MAX_CPU_CLUSTERS               2
++/* gts7xlwifi (t970-three-clusters.patch): three, SM8250's 4 Silver + 3 Gold + 1 Prime by the cpus' die-cluster-id, as SM-T733's 4+3+1. */
++#define MAX_CPU_CLUSTERS               3
+ #define __ARM_AMP__                    1
+ #endif  /* ARM64_BOARD_CONFIG_BCM2837 */
+ 
+--- a/osfmk/arm64/machine_routines.c
++++ b/osfmk/arm64/machine_routines.c
+@@ -1093,6 +1093,10 @@
+ 		 */
+ #if HAS_CLUSTER
+ 		uint32_t phys_cluster_id = MPIDR_CLUSTER_ID(cpu->phys_id);
++#elif defined(ARM64_BOARD_CONFIG_BCM2837)
++		/* gts7xlwifi: SM8250's MPIDR AFF1 numbers single cores (one DynamIQ cluster), so the scheduling cluster is the cpu node's
++		 * die-cluster-id (0 Silver, 1 Gold, 2 Prime); without it, the E/P split as before. */
++		uint32_t phys_cluster_id = (uint32_t)ml_readprop(child, "die-cluster-id", (cpu->cluster_type == CLUSTER_TYPE_P));
+ #else
+ 		uint32_t phys_cluster_id = (cpu->cluster_type == CLUSTER_TYPE_P);
+ #endif
+--- a/osfmk/kern/sched_clutch.c
++++ b/osfmk/kern/sched_clutch.c
+@@ -1227,7 +1227,14 @@
+ static uint32_t
+ sched_edge_clutch_bucket_group_preferred_cluster(sched_clutch_bucket_group_t clutch_bucket_group)
+ {
+-	return os_atomic_load(&clutch_bucket_group->scbg_preferred_cluster, relaxed);
++	uint32_t cluster_id = os_atomic_load(&clutch_bucket_group->scbg_preferred_cluster, relaxed);
++#if defined(ARM64_BOARD_CONFIG_BCM2837)
++	/* gts7xlwifi, as SM-T733 45e: early threads run before the secondary psets exist; until then the boot cluster. */
++	if (cluster_id >= MAX_PSETS || pset_array[cluster_id] == PROCESSOR_SET_NULL || !sched_edge_pset_available(pset_array[cluster_id])) {
++		return pset0.pset_cluster_id;
++	}
++#endif
++	return cluster_id;
+ }
+ 
+ static uint32_t
+@@ -4883,7 +4890,14 @@
+ 				/* P->P/E->E edge config */
+ 				bitmap_clear(src_pset->foreign_psets, dst_cluster_id);
+ 				bitmap_set(src_pset->native_psets, dst_cluster_id);
+-				sched_edge_config_set(src_cluster_id, dst_cluster_id, (sched_clutch_edge){.sce_migration_weight = 0, .sce_migration_allowed = 1, .sce_steal_allowed = 1});
++				uint32_t migration_weight = 0;
++#if defined(ARM64_BOARD_CONFIG_BCM2837)
++				/* gts7xlwifi, as SM-T733: Gold -> Prime only for a larger latency gain while Prime is busy; idle Prime stays usable. */
++				if (ml_get_die_cluster_id(src_cluster_id) == 1 && ml_get_die_cluster_id(dst_cluster_id) == 2) {
++					migration_weight = 16;
++				}
++#endif
++				sched_edge_config_set(src_cluster_id, dst_cluster_id, (sched_clutch_edge){.sce_migration_weight = migration_weight, .sce_migration_allowed = 1, .sce_steal_allowed = 1});
+ 			} else if ((src_pset->pset_type == CLUSTER_TYPE_P) && (dst_pset->pset_type == CLUSTER_TYPE_E)) {
+ 				/* P->E edge config */
+ 				bitmap_set(src_pset->foreign_psets, dst_cluster_id);
+--- a/osfmk/kern/processor.c
++++ b/osfmk/kern/processor.c
+@@ -367,6 +367,13 @@
+ cluster_type_t
+ pset_type_for_id(uint32_t cluster_id)
+ {
++#if defined(ARM64_BOARD_CONFIG_BCM2837)
++	/* gts7xlwifi, as SM-T733: the topology exists before ArmCpu registers the secondary psets. */
++	const ml_topology_info_t *topology = ml_get_topology_info();
++	if (cluster_id < topology->num_clusters) {
++		return topology->clusters[cluster_id].cluster_type;
++	}
++#endif
+ 	return pset_array[cluster_id]->pset_type;
+ }
+ 

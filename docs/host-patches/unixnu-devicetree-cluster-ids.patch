@@ -1,0 +1,15 @@
+diff --git a/scripts/unixnu/devicetree.py b/scripts/unixnu/devicetree.py
+index dd03dc3..49d92b5 100644
+--- a/scripts/unixnu/devicetree.py
++++ b/scripts/unixnu/devicetree.py
+@@ -358,6 +358,10 @@ def generate(dtb, config, *, unique_chip_id=None, data=False, trust=False, addon
+             if kind not in (['E'], ['P']):
+                 raise Error(f'{entry.name}: unixnu,cluster-type must be "E" or "P"')
+             properties.append(('cluster-type', struct.pack('<I', ord(kind[0]))))
++        # XNU's scheduling cluster and the core's index in it, where the MPIDR does not tell them (one DynamIQ cluster of mixed cores).
++        for source, target in (('unixnu,die-cluster-id', 'die-cluster-id'), ('unixnu,cluster-core-id', 'cluster-core-id')):
++            if source in entry.properties:
++                properties.append((target, struct.pack('<I', entry.scalar(source))))
+         cpu_nodes.append(node(f'cpu{len(cpu_nodes)}', properties))
+     if not cpu_nodes:
+         raise Error('Hardware DTS requires an enabled boot CPU')

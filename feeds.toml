@@ -4,3 +4,37 @@ kind = "soc"
 git = "https://github.com/FFT-infra/UniXNU-sm8250-common"
 # Shared SM8250 layer also used by alioth/munch/kebab; reviewed 2026-10-30.
 commit = "166235ec2480ff0992627b7aafa15c65ce6b4efa"
+
+# UFS transport: UniXNU-alioth's fork (FFT-infra/NativeUfs-alioth ab54059, BSD-2-Clause), vendored with the
+# gts7xlwifi changes: root image and Data container on the former Windows partition (sda39).
+[[source]]
+name = "ShengUfs"
+kind = "driver"
+local = "drivers/ShengUfs"
+
+# Touch to HID: UniXNU/ShengHidInput 5f3a37c (BSD-2-Clause-Patent), the IOHIDDevice publisher alioth also uses. The
+# board's own touch core (STM FTS on QUP SE5 I2C) fills the native_touch_* globals it reads.
+[[source]]
+name = "ShengHidInput"
+kind = "driver"
+local = "drivers/ShengHidInput"
+
+# GOP display: UniXNU's drivers/GopFramebuffer (core 066c8d8), copied so the PM sequence in NativeLegacyDisplay::start
+# can carry gts7xlwifi panel markers while it is diagnosed.
+[[source]]
+name = "GopFramebuffer"
+kind = "driver"
+local = "drivers/GopFramebuffer"
+
+# ArmCpu: UniXNU's drivers/ArmCpu 9066b53 (BSD-2-Clause-Patent), copied so the software-pended SPI IPIs can move to an INTID
+# range the T970's secure firmware leaves in group 1 non-secure (armcpu-spi-ipi-base); 1008..1015 stay group 0 here.
+[[source]]
+name = "ArmCpu"
+kind = "driver"
+local = "drivers/ArmCpu"
+
+# QcomXnuUsbDebug: FFT-infra/QcomXnuUsbDebug ab6e363 (MIT), the CDC-ACM debug console UniXNU-alioth uses on SM8250.
+[[source]]
+name = "QcomXnuUsbDebug"
+kind = "driver"
+local = "drivers/QcomXnuUsbDebug"

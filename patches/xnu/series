@@ -1,1 +1,13 @@
 # Board patch paths, one per line in application order.
+t970-ufs-data-mount.patch
+t970-dram-extend.patch
+t970-dram-holes.patch
+t970-gpu-addon-embedded.patch
+t970-qcom-usb-debug-console.patch
+t970-qcom-usb-debug-worker.patch
+t970-ui-trace.patch
+t970-migrate-once.patch
+t970-text-repage.patch
+t970-mgcache-once.patch
+t970-sandbox-grant-entitlement.patch
+t970-three-clusters.patch

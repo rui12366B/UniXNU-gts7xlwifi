@@ -1,2 +1,10 @@
 # Required firmware inputs: relative path | source | SHA-256 | consumer
-# Fill each entry from this board's firmware package.
+# None of these are in the repository. Pull them from your own SM-T970 (TWRP adb) into .cache/firmware/.
+.cache/firmware/gpu/a650_gmu.bin | /vendor/firmware/a650_gmu.bin | df79fa8482fcc7587bb239b9c9e2b24bce4729893b990fe3f82b30da8175b01c | scripts/gen-gpu-firmware-a650.py
+.cache/firmware/gpu/a650_sqe.fw | /vendor/firmware/a650_sqe.fw | b4c27420fd6a5c6b511b254cc0fad8cdd40eea38ceb3418f895a1084f4460487 | scripts/gen-gpu-firmware-a650.py
+.cache/firmware/gpu/a650_zap.mdt | firmware_mnt/image/a650_zap.mdt | d6dcaa62d18bfe6c93b787d0976cd0154fae9cb88f61f6c7dee0096eac9129e3 | scripts/gen-gpu-firmware-a650.py
+.cache/firmware/gpu/a650_zap.b00 | firmware_mnt/image/a650_zap.b00 | ec9b9d5a67456384809624b14a00d15d36297e5f2e75728504cd872bc95e0947 | scripts/gen-gpu-firmware-a650.py
+.cache/firmware/gpu/a650_zap.b01 | firmware_mnt/image/a650_zap.b01 | b18f249c9c36495daf6adfa21870beb6339586932ae04f03ef8ddf7fb99583a0 | scripts/gen-gpu-firmware-a650.py
+.cache/firmware/gpu/a650_zap.b02 | firmware_mnt/image/a650_zap.b02 | a415e5452fa8f597670a6e51010e97bfabca7d20fbce8044caed64d9d5873113 | scripts/gen-gpu-firmware-a650.py
+.cache/firmware/wifi/qca6390/amss20.bin | /vendor/firmware/qca6390/amss20.bin | 5dcbc6497bf271966bfaa8df7d5f57de374f833e9069475107e9bc644e8e3af2 | GPU addon (T970WifiProbe stage 5)
+.cache/firmware/wifi/qca6390/m3.bin | /vendor/firmware/qca6390/m3.bin | 804777d787eb3089b437fdf186049ead0a0c27e3c46ef0df6ddb8a5c5280c13f | GPU addon (later Wi-Fi stages)

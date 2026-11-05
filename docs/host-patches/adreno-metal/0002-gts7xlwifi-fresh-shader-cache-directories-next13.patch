@@ -1,0 +1,60 @@
+From cac36d66a1494a384dae7dd279ea9bb098bb4be2 Mon Sep 17 00:00:00 2001
+From: t970 <morninglane27@gmail.com>
+Date: Wed, 4 Nov 2026 06:38:40 +0000
+Subject: [PATCH 2/7] gts7xlwifi: fresh shader cache directories (next13)
+
+---
+ NativeAdrenoMetalPlugin.mm | 8 +++++---
+ SharedShaderCache.h        | 3 ++-
+ 2 files changed, 7 insertions(+), 4 deletions(-)
+
+diff --git a/NativeAdrenoMetalPlugin.mm b/NativeAdrenoMetalPlugin.mm
+index f24ab9b..362415e 100644
+--- a/NativeAdrenoMetalPlugin.mm
++++ b/NativeAdrenoMetalPlugin.mm
+@@ -81,7 +81,7 @@ static bool readTask(uintptr_t address, void *out, size_t size) {
+     vm_size_t got = 0;
+     return vm_read_overwrite(mach_task_self(), address, size, (vm_address_t) out, &got) == KERN_SUCCESS && got == size;
+ }
+-static bool writeTask(uintptr_t address, const void *data, size_t size) {
++__attribute__((unused)) static bool writeTask(uintptr_t address, const void *data, size_t size) {  // arm64e (iPadOS 27) only
+     return vm_write(mach_task_self(), address, (vm_offset_t) data, (mach_msg_type_number_t) size) == KERN_SUCCESS;
+ }
+ // EXPERIMENT (second report onward): this display path takes plain 8-bit BGRA only, so tell the render server's display that it has neither the deep
+@@ -171,7 +171,8 @@ static id clientDevice(unsigned port) {
+     for (unsigned i : {2u, 0u, 1u}) {
+         if (device) break;
+         if (!candidates[i][0]) continue;
+-        if (i != 2) strlcat(candidates[i], "m2v", sizeof candidates[i]);
++        // gts7xlwifi: not v95's "m2v" (next13): the private caches of that runtime stay where it left them and are never read here.
++        if (i != 2) strlcat(candidates[i], "m2v-t970", sizeof candidates[i]);
+         mkdir(candidates[i], 0700);
+         if (access(candidates[i], W_OK) != 0) continue;
+         ++usable;
+@@ -371,7 +372,8 @@ static id deviceForPort(unsigned port) {
+         for (unsigned i : order) {
+             if (device) break;
+             if (!candidates[i][0]) continue;
+-            if (i != 5) strlcat(candidates[i], "m2v", sizeof candidates[i]);
++            // gts7xlwifi: not v95's "m2v" (next13), whose render-server cache lives in com.apple.backboardd/m2v.
++            if (i != 5) strlcat(candidates[i], "m2v-t970", sizeof candidates[i]);
+             mkdir(candidates[i], 0700);
+             if (access(candidates[i], W_OK) != 0) continue;
+             // Files an earlier image's copying import left half written here (int 590aaee2), which hold memory of the Data disk.
+diff --git a/SharedShaderCache.h b/SharedShaderCache.h
+index f02320e..8d9cd60 100644
+--- a/SharedShaderCache.h
++++ b/SharedShaderCache.h
+@@ -19,7 +19,8 @@ inline std::string sharedShaderCacheDirectory() {
+             passwd user{}, *found=nullptr;
+             std::vector<char> bytes(16384);
+             if (getpwuid_r(getuid(), &user, bytes.data(), bytes.size(), &found) || !found || !user.pw_dir) return {};
+-            root = std::string(user.pw_dir) + "/Library/Caches/org.unixnu.metal";
++            // gts7xlwifi: a directory of its own (next13), so nothing this runtime reads was written by another build of it.
++            root = std::string(user.pw_dir) + "/Library/Caches/org.unixnu.metal.t970";
+         }
+         mkdir(root.c_str(), 0700);
+         struct stat st = {};
+-- 
+2.54.0 (Apple Git-157)
+

@@ -1,0 +1,79 @@
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+index 3455bc1..e3c4ed0 100644
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7987,6 +7987,66 @@ native_staged_apps_prepare(proc_t p, user_addr_t scratch, mount_t data_mount)
+ 	vnode_put(vp);
+ }
+ 
++/* gts7xlwifi: install the staged system apps. sheng-staged-apps=1 copied them into Data (v91: 6574 directories, 445 MiB), but only
++ * SystemAppMigrator installs them, and it runs only in the first-boot data migration, which the Data seed skips: its
++ * com.apple.migration preferences carry LastSystemVersion = the OS build (seed-data-skip-setup.py). Once the copy is complete
++ * (/private/var/db/.sheng-staged-apps), this moves those preferences, and com.apple.DataMigration's where it exists, aside once,
++ * so the next launchd runs the migration as after a restore; /private/var/db/.t970-migrate-once marks it done, and the moved
++ * files keep a .t970 suffix. Setup stays done (com.apple.purplebuddy is untouched). Counters for the boot log: [0] stage
++ * (1 moved, 2 done before, -1 no complete copy, -2 the marker failed), [1] files moved, [2] the last error. */
++volatile int native_t970_migrate[3] = {0, 0, 0};
++static const char native_t970_migrate_marker[] = "/private/var/db/.t970-migrate-once";
++static void
++native_t970_migrate_once(proc_t p, user_addr_t scratch)
++{
++	static const char *const prefs[2] = {
++		"/private/var/mobile/Library/Preferences/com.apple.migration.plist",
++		"/private/var/mobile/Library/Preferences/com.apple.DataMigration.plist",
++	};
++	vfs_context_t ctx = vfs_context_current();
++	vnode_t vp = NULLVP;
++	if (!vnode_lookup(native_t970_migrate_marker, VNODE_LOOKUP_NOFOLLOW, &vp, ctx)) {
++		vnode_put(vp);
++		native_t970_migrate[0] = 2;
++		return;
++	}
++	if (vnode_lookup(native_staged_apps_marker, VNODE_LOOKUP_NOFOLLOW, &vp, ctx)) {
++		native_t970_migrate[0] = -1;
++		return;
++	}
++	vnode_put(vp);
++	char to[128];
++	for (int i = 0; i < 2; i++) {
++		/* The scratch is one 4 KiB page; the mount arguments end below 0xa00 and the staged-apps copy is finished. */
++		struct rename_args request = {.from = scratch + 0xa00, .to = scratch + 0xc00};
++		int32_t result = 0;
++		snprintf(to, sizeof(to), "%s.t970", prefs[i]);
++		int error = copyout(prefs[i], request.from, strlen(prefs[i]) + 1);
++		if (!error) {
++			error = copyout(to, request.to, strlen(to) + 1);
++		}
++		if (!error) {
++			error = rename(p, &request, &result);
++		}
++		if (!error) {
++			native_t970_migrate[1]++;
++		} else if (error != ENOENT) {
++			native_t970_migrate[2] = error;
++		}
++	}
++	vnode_t marker = NULLVP;
++	int error = vnode_open(native_t970_migrate_marker, O_CREAT | O_TRUNC | FWRITE | O_NOFOLLOW, 0644, 0, &marker, ctx);
++	if (!error) {
++		error = vnode_close(marker, FWRITE, ctx);
++	}
++	if (error) {
++		native_t970_migrate[2] = error;
++		native_t970_migrate[0] = -2;
++	} else {
++		native_t970_migrate[0] = 1;
++	}
++}
++
+ static int
+ native_owner_data_prepare(proc_t p, user_addr_t scratch)
+ {
+@@ -8047,6 +8107,7 @@ native_owner_data_prepare(proc_t p, user_addr_t scratch)
+ 	if (!error) native_owner_data_stage = 4;
+ 	if (!error) native_gpu_addon_prepare(p, scratch);
+ 	if (!error) native_staged_apps_prepare(p, scratch, data_mount);
++	if (!error) native_t970_migrate_once(p, scratch);
+ done:
+ 	if (data_root) vnode_put(data_root);
+ 	native_owner_data_status = error;

@@ -1,0 +1,73 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -8044,7 +8044,62 @@
+ 		native_t970_migrate[0] = -2;
+ 	} else {
+ 		native_t970_migrate[0] = 1;
++	}
++}
++
++/* gts7xlwifi: the display policy (board.toml text_fixups + /product/artwork-display-gamut = "sRGB", as SM-T733's
++ * 21H461-srgb-bgra8-1) changes MobileGestalt answers such as hasExtendedColorDisplay, but MG persists its answers. Once per
++ * policy version (/private/var/db/.t970-display-policy-1), before launchd starts, this moves MG's persisted caches aside
++ * (".t970" suffix) so every consumer recomputes them from the ADT. Counters for the boot log: [0] stage (1 moved, 2 done
++ * before, -2 the marker failed), [1] files moved, [2] the last error. */
++volatile int native_t970_mgcache[3] = {0, 0, 0};
++static const char native_t970_mgcache_marker[] = "/private/var/db/.t970-display-policy-1";
++static void
++native_t970_mgcache_once(proc_t p, user_addr_t scratch)
++{
++	static const char *const caches[4] = {
++		"/private/var/containers/Shared/SystemGroup/systemgroup.com.apple.mobilegestaltcache/Library/Caches/com.apple.MobileGestalt.plist",
++		"/private/var/mobile/Library/Preferences/com.apple.MobileGestalt.plist",
++		"/private/var/mobile/Library/Preferences/com.apple.mobilegestalt.plist",
++		"/private/var/mobile/Library/Caches/com.apple.MobileGestalt.plist",
++	};
++	vfs_context_t ctx = vfs_context_current();
++	vnode_t vp = NULLVP;
++	if (!vnode_lookup(native_t970_mgcache_marker, VNODE_LOOKUP_NOFOLLOW, &vp, ctx)) {
++		vnode_put(vp);
++		native_t970_mgcache[0] = 2;
++		return;
++	}
++	char to[192];
++	for (int i = 0; i < 4; i++) {
++		/* Same scratch page layout as native_t970_migrate_once: source at +0xa00, target at +0xc00 (512 bytes each). */
++		struct rename_args request = {.from = scratch + 0xa00, .to = scratch + 0xc00};
++		int32_t result = 0;
++		snprintf(to, sizeof(to), "%s.t970", caches[i]);
++		int error = copyout(caches[i], request.from, strlen(caches[i]) + 1);
++		if (!error) {
++			error = copyout(to, request.to, strlen(to) + 1);
++		}
++		if (!error) {
++			error = rename(p, &request, &result);
++		}
++		if (!error) {
++			native_t970_mgcache[1]++;
++		} else if (error != ENOENT) {
++			native_t970_mgcache[2] = error;
++		}
+ 	}
++	vnode_t marker = NULLVP;
++	int error = vnode_open(native_t970_mgcache_marker, O_CREAT | O_TRUNC | FWRITE | O_NOFOLLOW, 0644, 0, &marker, ctx);
++	if (!error) {
++		error = vnode_close(marker, FWRITE, ctx);
++	}
++	if (error) {
++		native_t970_mgcache[2] = error;
++		native_t970_mgcache[0] = -2;
++	} else {
++		native_t970_mgcache[0] = 1;
++	}
+ }
+ 
+ static int
+@@ -8108,6 +8163,7 @@
+ 	if (!error) native_gpu_addon_prepare(p, scratch);
+ 	if (!error) native_staged_apps_prepare(p, scratch, data_mount);
+ 	if (!error) native_t970_migrate_once(p, scratch);
++	if (!error) native_t970_mgcache_once(p, scratch);
+ done:
+ 	if (data_root) vnode_put(data_root);
+ 	native_owner_data_status = error;

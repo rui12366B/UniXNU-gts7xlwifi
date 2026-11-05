@@ -4,3 +4,8 @@
 __pycache__/
 *.pyc
 .DS_Store
+/.cache/
+# Generated from the tablet's own firmware (scripts/gen-gpu-firmware-a650.py); Qualcomm/Samsung images are not redistributed.
+/package/GpuFirmwareA650.c
+# Upstream git metadata of vendored drivers and kits, kept locally
+/.upstream-git/

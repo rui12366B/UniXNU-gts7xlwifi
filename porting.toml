@@ -1,10 +1,10 @@
 schema_version = 1
 
 [device]
-name = "example"
-soc = "SM8550"
+name = "gts7xlwifi"
+soc = "SM8250"
 os_profile = "ipados-17.7.11-21H461"
-summary = "Device template. Complete each area with board-specific inputs and evidence."
+summary = "Samsung Galaxy Tab S7+ Wi-Fi (SM-T970). Format 2 configuration resolves; drivers move from the S7plus-iPadOS work per MIGRATION.md."
 
 [[area]]
 id = "configuration"
@@ -16,7 +16,7 @@ configuration = ["Record the board.toml fields, DTS properties and defconfig val
 procedure = ["Follow the configuration stage in the porting guide and record the actual commands."]
 findings = ["Collect the first configuration observation, its cause when established, and the resulting implementation decision."]
 completion = ["All source pins resolve; every selected component has a record; status shows the intended overrides and patch order."]
-limits = ["Hardware inputs and implementation are pending for this example board."]
+limits = ["Hardware inputs and implementation are pending for this board."]
 next_action = ["Inventory the required configuration inputs before implementation."]
 evidence = []
 
@@ -30,7 +30,7 @@ configuration = ["Record the board.toml fields, DTS properties and defconfig val
 procedure = ["Follow the firmware and boot stage in the porting guide and record the actual commands."]
 findings = ["Collect the first firmware and boot observation, its cause when established, and the resulting implementation decision."]
 completion = ["Firmware image builds, enters UniXNU, publishes the framebuffer and preserves the documented memory reservations."]
-limits = ["Hardware inputs and implementation are pending for this example board."]
+limits = ["Hardware inputs and implementation are pending for this board."]
 next_action = ["Inventory the required firmware and boot inputs before implementation."]
 evidence = []
 
@@ -44,7 +44,7 @@ configuration = ["Record the board.toml fields, DTS properties and defconfig val
 procedure = ["Follow the cpu and interrupts stage in the porting guide and record the actual commands."]
 findings = ["Collect the first cpu and interrupts observation, its cause when established, and the resulting implementation decision."]
 completion = ["Every enabled CPU reaches its entry checkpoint and timer/IPI handling works on each enabled CPU."]
-limits = ["Hardware inputs and implementation are pending for this example board."]
+limits = ["Hardware inputs and implementation are pending for this board."]
 next_action = ["Inventory the required cpu and interrupts inputs before implementation."]
 evidence = []
 
@@ -58,7 +58,7 @@ configuration = ["Record the board.toml fields, DTS properties and defconfig val
 procedure = ["Follow the memory and dma stage in the porting guide and record the actual commands."]
 findings = ["Collect the first memory and dma observation, its cause when established, and the resulting implementation decision."]
 completion = ["All handoff regions are accounted for and each enabled DMA engine accesses its allocated range with the documented cache policy."]
-limits = ["Hardware inputs and implementation are pending for this example board."]
+limits = ["Hardware inputs and implementation are pending for this board."]
 next_action = ["Inventory the required memory and dma inputs before implementation."]
 evidence = []
 
@@ -72,7 +72,7 @@ configuration = ["Record the board.toml fields, DTS properties and defconfig val
 procedure = ["Follow the storage and root stage in the porting guide and record the actual commands."]
 findings = ["Collect the first storage and root observation, its cause when established, and the resulting implementation decision."]
 completion = ["Host: register, clock, link and SMMU facts match the board inventory.", "Reads: SCSI capacity, GPT and known blocks are correct; OS/SystemOS windows stay within userdata.", "Root: the configured volume mounts and launchd starts. Persistence: writes survive reboot within the allocated Data region."]
-limits = ["Hardware inputs and implementation are pending for this example board."]
+limits = ["Hardware inputs and implementation are pending for this board."]
 next_action = ["Inventory the required storage and root inputs before implementation."]
 evidence = []
 
@@ -86,7 +86,7 @@ configuration = ["Record the board.toml fields, DTS properties and defconfig val
 procedure = ["Follow the display stage in the porting guide and record the actual commands."]
 findings = ["Collect the first display observation, its cause when established, and the resulting implementation decision."]
 completion = ["A known frame appears with correct geometry and colors, then userland presentation and backlight controls work."]
-limits = ["Hardware inputs and implementation are pending for this example board."]
+limits = ["Hardware inputs and implementation are pending for this board."]
 next_action = ["Inventory the required display inputs before implementation."]
 evidence = []
 
@@ -100,7 +100,7 @@ configuration = ["Record the board.toml fields, DTS properties and defconfig val
 procedure = ["Follow the input stage in the porting guide and record the actual commands."]
 findings = ["Collect the first input observation, its cause when established, and the resulting implementation decision."]
 completion = ["Touches map to the display, simultaneous contacts keep stable IDs, release events arrive, and buttons produce expected HID reports."]
-limits = ["Hardware inputs and implementation are pending for this example board."]
+limits = ["Hardware inputs and implementation are pending for this board."]
 next_action = ["Inventory the required input inputs before implementation."]
 evidence = []
 
@@ -114,7 +114,7 @@ configuration = ["Record the board.toml fields, DTS properties and defconfig val
 procedure = ["Follow the gpu stage in the porting guide and record the actual commands."]
 findings = ["Collect the first gpu observation, its cause when established, and the resulting implementation decision."]
 completion = ["GPU submissions complete, mapping/fence handling is correct, a known image renders, and the selected Metal client presents it."]
-limits = ["Hardware inputs and implementation are pending for this example board."]
+limits = ["Hardware inputs and implementation are pending for this board."]
 next_action = ["Inventory the required gpu inputs before implementation."]
 evidence = []
 
@@ -128,7 +128,7 @@ configuration = ["Record the board.toml fields, DTS properties and defconfig val
 procedure = ["Follow the network stage in the porting guide and record the actual commands."]
 findings = ["Collect the first network observation, its cause when established, and the resulting implementation decision."]
 completion = ["Scanning, association, address configuration and sustained receive/transmit traffic pass with the selected firmware."]
-limits = ["Hardware inputs and implementation are pending for this example board."]
+limits = ["Hardware inputs and implementation are pending for this board."]
 next_action = ["Inventory the required network inputs before implementation."]
 evidence = []
 
@@ -142,7 +142,7 @@ configuration = ["Record the board.toml fields, DTS properties and defconfig val
 procedure = ["Follow the audio stage in the porting guide and record the actual commands."]
 findings = ["Collect the first audio observation, its cause when established, and the resulting implementation decision."]
 completion = ["Each declared route carries the selected audio format through playback or capture and handles start/stop correctly."]
-limits = ["Hardware inputs and implementation are pending for this example board."]
+limits = ["Hardware inputs and implementation are pending for this board."]
 next_action = ["Inventory the required audio inputs before implementation."]
 evidence = []
 
@@ -156,7 +156,7 @@ configuration = ["Record the board.toml fields, DTS properties and defconfig val
 procedure = ["Follow the power stage in the porting guide and record the actual commands."]
 findings = ["Collect the first power observation, its cause when established, and the resulting implementation decision."]
 completion = ["Declared power controls and battery readings match observations; each claimed sleep/resume transition restores its dependent peripherals."]
-limits = ["Hardware inputs and implementation are pending for this example board."]
+limits = ["Hardware inputs and implementation are pending for this board."]
 next_action = ["Inventory the required power inputs before implementation."]
 evidence = []
 
@@ -170,7 +170,7 @@ configuration = ["Record the board.toml fields, DTS properties and defconfig val
 procedure = ["Follow the image assembly stage in the porting guide and record the actual commands."]
 findings = ["Collect the first image assembly observation, its cause when established, and the resulting implementation decision."]
 completion = ["Kernel and prelink succeed, payload contains all declared inputs, and the boot image matches the bootloader format and size limit."]
-limits = ["Hardware inputs and implementation are pending for this example board."]
+limits = ["Hardware inputs and implementation are pending for this board."]
 next_action = ["Inventory the required image assembly inputs before implementation."]
 evidence = []
 
@@ -184,6 +184,6 @@ configuration = ["Record the board.toml fields, DTS properties and defconfig val
 procedure = ["Follow the diagnostics stage in the porting guide and record the actual commands."]
 findings = ["Collect the first diagnostics observation, its cause when established, and the resulting implementation decision."]
 completion = ["Each claimed milestone has a reproducible command, a matching source/image revision and an accessible result."]
-limits = ["Hardware inputs and implementation are pending for this example board."]
+limits = ["Hardware inputs and implementation are pending for this board."]
 next_action = ["Inventory the required diagnostics inputs before implementation."]
 evidence = []

@@ -1,45 +1,265 @@
 schema_version = 2
 
 [board]
-example = true
+# Real board values are in place (2026-10-30); drivers move per MIGRATION.md.
+example = false
 name = "gts7xlwifi"
 soc = "SM8250"
 soc_source = "sm8250"
 os_profile = "ipados-17.7.11-21H461"
-description = "Samsung Galaxy Tab S7+ Wi-Fi (SM-T970, gts7xlwifi); scaffold, hardware values pending"
+description = "Samsung Galaxy Tab S7+ Wi-Fi (SM-T970, gts7xlwifi)"
 kit = "gts7xlwifi"
 
 [components]
-include = ["ArmDTPlatform", "ArmCpu", "SoftwareAES", "XnuPrelink", "DarwinBoot"]
+include = ["ArmDTPlatform", "ArmCpu", "SoftwareAES", "ShengUfs", "VirtioMmioBlock", "GopFramebuffer", "AppleKeyStoreState", "ShengHidInput", "XnuPrelink", "DarwinBoot"]
 
 [kernel]
 defconfig = "gts7xlwifi_defconfig"
 config_fragments = ["arch:configs/common.config", "soc:configs/sm8250.config", "os:configs/ipados.config"]
-patch_series = ["arch:patches/xnu/series", "soc:patches/xnu/series", "os:patches/xnu/series", "device:patches/xnu/series"]
+patch_series = ["arch:patches/xnu/series", "soc:patches/xnu/series", "device:patches/xnu/before-os.series", "os:patches/xnu/series", "device:patches/xnu/series"]
+# The default archive list of the first build (kernel-build.log) plus the boot diagnostic.
+archives = [
+  "build-corecrypto-14.py",
+  "build-corecrypto-14.py --namespace",
+  "component:ArmDTPlatform",
+  "component:ArmCpu",
+  "component:SoftwareAES",
+  "build-software-aes-bindings.py",
+  # Owner root authentication: the signed policies of the SHNGROOT OS/SystemOS windows on sda39.
+  "build-root-policy-archive.py --tree . --policies .cache/firmware/root-policies --output build/verified-root-os-xnu-bundle",
+  "component:ShengUfs",
+  "build-storage-bindings.py --object build/sheng-ufs/NativeUfs.o --archive libShengUfs.a",
+  # Root authentication only: the DTS has no virtio,mmio node, so the transport never probes. It
+  # provides native_verified_block_root_authorized(), which reaches ShengUfs through the weak
+  # native_ufs_block_authenticates(). The kernel links the multi-policy bundle.
+  "build-arm-driver.py VirtioMmioBlock --verified-root --verified-root-bundle",
+  "build-storage-bindings.py --object build/virtio-mmio-block-verified-bundle/NativeVirtioBlock.o --archive libVirtioMmioBlock.a --provided-by build/sheng-ufs/bindings.json",
+  "build-mockfs-fixture.py",
+  "build-platform-power.py",
+  "build-boot-progress.py",
+  "build-link-stubs.py",
+  "build-libpthread-kernel.py",
+  "component:AppleKeyStoreState",
+  # The GOP display path, as UniXNU-alioth: libNativeLegacyDisplay.late.a binds the owned backend to the
+  # prelinked original IOMobileFramebufferLegacy and also archives the board probes (display, HID start,
+  # key store, CPU frequency, backlight, buttons) and ShengHidInput's publisher, because it is the
+  # archive the kernel link force-loads.
+  "build-gop-legacy-display.py",
+  # The A650 kernel GPU driver (drivers/Adreno650, FFT-infra/Adreno650 bdee54c as UniXNU-alioth) with the kits it needs and the
+  # board probe (package/GpuProbe.cpp, pipa-gpu=<n>) and this tablet's firmware (package/GpuFirmwareA650.c).
+  "build-adreno650.py",
+  # The CDC-ACM debug console over the DWC3 the bootloader leaves in DEVICE mode (drivers/QcomXnuUsbDebug).
+  "build-qcom-usb-debug.py",
+  # Its own recipe output is archived by the display recipe above; listed because a selected component
+  # needs an archive entry (alioth does the same).
+  "component:ShengHidInput",
+]
 
 [device_tree]
 source = "device:dts/gts7xlwifi.dts"
 include_dirs = ["soc:dts"]
 
+[ipsw]
+# The official iPad Pro 12.9" (2nd gen) restore, as UniXNU-alioth pins it. Every member hash below
+# was recomputed from ../inputs/donor/ipsw/21H461 on 2026-10-30 and matches alioth's pins.
+url = "https://updates.cdn-apple.com/2025SpringFCS/fullrestores/122-77166/DCA6CFE8-90E9-4B92-880D-3DE171798E40/iPad_Pro_HFR_17.7.11_21H461_Restore.ipsw"
+product = "iPad7,1"
+version = "17.7.11"
+build = "21H461"
+device_class = "j120ap"
+# Apple's j120ap ApChipID/ApBoardID for the BuildIdentity lookup; not [payload.adt] chip_id.
+chip_id = 0x8011
+board_id = 0x0C
+fetch = ["KernelCache", "DeviceTree", "StaticTrustCache", "Cryptex1,SystemTrustCache"]
+
+[ipsw.sha256]
+"044-76034-038.dmg" = "b4908cde41d23e6bc05e6af51a2c9eeb00cf0f863a6a18b1600c96a3fd70414f"
+"044-76040-038.dmg" = "3f99b859c9728379110b66657c7b15285bcb1925ad8b5726542e2cdcf8b1028d"
+"044-76034-038.dmg.trustcache" = "9742f3d566369e6c48f63b3dc0740b06c243d13c6650e25bbf44616e13d6d097"
+"044-76040-038.dmg.trustcache" = "4563bdbf6ed8f72237d45dbba3ccde432634338f95c10d79d5d4631678a97c7c"
+"DeviceTree.j120ap.im4p" = "3f612f64819fbf6a8aacc03fabeda08ba897c4bf5385df995c59815c0c80c8f0"
+
 [firmware]
-# Replace with this board's UEFI configuration and paths.
-config = "example"
-dsc = "Platforms/Vendor/examplePkg/example.dsc"
-fd = "Build/examplePkg/{target}_CLANGPDB/FV/SILICIUM_UEFI.fd"
-packages = ["{uefi}", "{tree}/package", "{tree}/drivers/DarwinBoot", "{edk2}"]
+# The tablet's existing UEFI: Renegade edk2 platform built by ../firmware-t970/tools/build-ipados.sh
+# (GCC5, not Mu-Silicium CLANGPDB). Its FD is wrapped by tools/wrap-raw.py into the raw image the
+# outer Android selector jumps to; that wrapping and the selector stay outside this build.
+config = "gts7xlwifi-upstream"
+dsc = "Platform/Samsung/sm8250/gts7xlwifi-upstream.dsc"
+fd = "Build/Gts7xlwifiUpstream/{target}_GCC5/FV/GTS7XLWIFI_UPSTREAM.fd"
+packages = ["{uefi}", "{uefi}/Common/edk2-platforms", "{uefi}/GPLDrivers", "{uefi}/GPLDrivers/Library/SimpleInit", "{uefi}/LocalPackages", "{tree}/package", "{tree}/drivers/DarwinBoot", "{edk2}"]
 
 [firmware.defines]
-DEVICE_MODEL = "example"
+# The exact defines of the deployed build (tools/build-ipados.sh).
+FIRMWARE_VER = "SM-T970-UNIXNU-EXPERIMENTAL"
+MEMORY_ENABLE = "1"
+ACPI_PSCI_SMC_ENABLE = "1"
+VENDOR_CHAIN_ENABLE = "1"
+SHELL_EXTENDED = "0"
+UFS_INHERITED_HANDOFF_ENABLE = "1"
+SMBIOS_FORMFACTOR_ENABLE = "1"
+LOW_FD_MMU_HELPER_ENABLE = "1"
+TOUCH_FULL_INPUT_ENABLE = "0"
+POWER_OBSERVE_ENABLE = "0"
 
 [payload]
-volume = "EXAMPLE"
-size_mib = 192
+# Files go to the existing ESP (sda37, 536870912 bytes), not a new FAT; the
+# volume label is not recorded yet, so it is not guessed here.
+size_mib = 512
 loader = "firmware"
 title = "UniXNU"
-kernel_args = ["-v", "serial=3"]
+# Full span from 0x80000000 to the end of the last bank (0x280000000).
+dram_size = "0x200000000"
+# Eight cores with the SM8250 IPI routing UniXNU-alioth/sheng qualified: ArmCpu issues PSCI
+# CPU_ON only with sheng-smp; SGIs do not reach these cores, so IPIs are SPIs and each core
+# signals itself once. armcpu-diagnostics reports each SMP step on the console.
+# The two unchanged 21H461 trust-cache modules (StaticTrustCache 2478 entries, then
+# Cryptex1,SystemTrustCache 76), bundled as scripts/build-original-system-trust.py does
+# (.cache/firmware/trust/original-static-system.trustcache, 2026-10-31). Without one AMFI
+# refuses launchd's first exec.
+# The original two Apple modules, and (since the GPU) the owner bundle: one module with the NativeAdrenoMetal plugin, adrenoprobed and
+# Turnip CDHashes (UniXNU-fft scripts/make-owner-trust-bundle.py) followed by the same two modules byte for byte.
+trust_cache_sha256 = ["7416ca4f8377146626bb284e2133c76bee6cb4e3ee0af5d648b186235a7323a7", "fc39331d4cba48e06890dacf720dfd13ba6fab75e45c30243f42ec97c5ff4263"]
+# Stage bars (kernel entry, MMU enable) and panic() drawn on the frame buffer
+# (scripts/patch-xnu-entry-probe.py): there is no serial console on this tablet.
+panic_screen = true
+# Reset probes (2026-10-30, 768 MiB): arm_vm_init returns; a reset before PE_create_console
+# fired and one after it did not. Cause: CONFIG_XNU_DT_PANIC_REGION was missing from the
+# defconfig. Probes off again; the panic screen and the -v console take over from here.
+# No -v: DarwinBoot sets Boot_Video.v_display = 0 (text console) when the command line has -v
+# (BootConsoleMode.h), and NativeLegacyDisplay then is not the primary display: isMainDisplay() is false, so
+# backboardd never presents, and with offline-legacy-pm the start() refusal path stops in the original stop()
+# (v16-v22). The persistent log in winre replaces the verbose console.
+kernel_args = ["kt_fixed_zones=120", "sheng-smp=1",
+  "armcpu-spi-ipi=1", "armcpu-spi-ipi-base=544", "armcpu-self-ipi=1", "armcpu-diagnostics=1",
+  # 3 leaves the panel to the GOP display driver once it registers, as alioth.
+  "boot-progress=3",
+  # Publish the original PMGR nub (ShengPlatformPower mode 2), as alioth.
+  "sheng-pmgr=2",
+  # ShengUfs: SHNGROOT root on sda39. SM8250 routes the UFS host through SMMU streams 0x0e0 and
+  # 0x4e0 (SoC routing, as alioth; the Samsung DT binds no SMMU to ufshc, so the driver only
+  # validates the existing bypass contexts read-only before reusing them).
+  "native-ufs-root=1", "native-ufs-stream=0xe0", "native-ufs-stream2=0x4e0",
+  # The APFS Data container after the root image, read-write, mounted at /private/var.
+  "t970-ufs-data=1", "ufsrw=1",
+  # The kernel manages DRAM from the owned window up to here (patches/xnu/t970-dram-extend.patch):
+  # 768 MiB left ~1 MiB free once launchd ran and jetsam kept killing daemons (v14, 2026-10-31).
+  "t970-dram-end=0x280000000",
+  # Display, as UniXNU-alioth: load the original mobile graphics family and drive the prelinked
+  # IOMobileFramebufferLegacy from the GOP framebuffer (offline-component-load-probes.patch).
+  # offline-legacy-pm: backboardd only presents after it turns display power on (sirius). Its PM registration in
+  # NativeLegacyDisplay::start held bsd_init here (v16-v17b); v21 paints bands 11-14 at each PM step to find where.
+  "panic_on_crash_disabled=1", "offline-mobile-graphics-load=1", "offline-legacy-pm=1",
+  "offline-legacy-register=1", "offline-legacy-gop=1", "offline-legacy-validate=1", "offline-legacy-phase=4",
+  "offline-legacy-transfer=1", "offline-legacy-cpu-present=1",
+  # No offline-legacy-reached: its stage bands (8 violet, 9 white) stay painted over the UI once it draws (v23).
+  "sheng-vsync=60",
+  # Userspace load, as alioth: fewer daemons and no watchdogd panics while there is no SEP or GPU.
+  "sheng-lite=1", "sheng-disable-jobs=com.apple.liveactivitiesd,com.apple.cryptexd,com.apple.routined",
+  "sheng-disable-watchdogd=1",
+  # Key store stand-in, HID publisher, key events and the PON/PM8150L buttons (ButtonProbe.cpp).
+  "sheng-aks=1", "offline-hid-input=1", "offline-key-events=1", "alioth-bt=1",
+  # Persistent log (package/BootLog.c) every 2 s into the last 288 MiB of winre (sda40, the old Windows
+  # recovery partition), read back from TWRP with deploy/.../read-boot-log.py. ShengUfs refuses it elsewhere.
+  "sheng-log=1",
+  # Speed without a GPU: vote the highest non-turbo level in all three EPSS domains (package/CpuFreqProbe.cpp; the live
+  # FDT has qcom,cpufreq-hw-epss at 0x18591000/2000/3000 like alioth), and write-combine the GOP scanout.
+  "sheng-cpufreq=3", "sheng-cpufreq-cap=2000", "qcom-usb-debug=1", "qcom-usb-ctl=1", "t970-fb-wc=1", "t970-fb-src-wb=1",
+  # Touch: package/T970FtsTouch.cpp (STM fts1ba90a, GPIO I2C on GPIO 12/13, RPMh L13/L14) feeding ShengHidInput.
+  # t970-touch-xform: 1 swap axes (default), 2 mirror x, 4 mirror y.
+  "pipa-gpu=12", "pipa-turnip-debug=noubwc,nocb", "sheng-gpu-addon=1", "sheng-fb-gpu=1", "native-touch=1", "sheng-touch-hid=1", "t970-touch-xform=5",
+  # next2: direct scanout (the display fetches the compositor's surface: NativeUfs DpuWindow.h + NativeLegacyDisplay's T970 pipe
+  # discovery; it declines itself and keeps the GPU copy when the window or the pipes are not as expected, [direct] row), and the
+  # wallpaper freeze (AdrenoMetal: a Poster process's first big frame is kept, its later command buffers are held back).
+  # Room: keepsyms, pipa-gpu-pool (BOs are pageable system memory now, the pool default is 0), offline-legacy-verdict (an early
+  # bring-up panic) and sheng-staged-apps=1 (the copy finished in v91; t970-migrate-once.patch installs them) left the line.
+  "sheng-dpu-scanout=2", "sheng-wallpaper-freeze=1"]
+# Brightness (package/BacklightProbe.cpp, the S6TUUM3 panel over DSI0 and DSI1) is on without an argument: the command line
+# is at its 1000-byte limit. t970-bl=0 turns it off.
+# Text fixups (kernel native-text-fixup.patch, applied to a signed page before it first runs, re-applied on page-in): this array
+# replaces the OS profile's, so its four come first. Then the 21H461 display format policy of UniXNU-sm-t733 (RigoLigo, SM-T733 / A642L,
+# docs/DISPLAY_FORMAT_POLICY_2026-10-28.md, board.toml "21H461-srgb-bgra8-1"): RenderBox RB::ColorMode::pixel_format takes its BGRA8
+# branch for ordinary RGB8 output, and QuartzCore stores false for CADeviceUseCIF10 (MG and preference), universal and lossy compression,
+# EDR factor, hardware HDR and HDR TV modes. 2026-11-05 (periph11): every layer was a private RGB10A8_2P_XR10 texture and the framebuffer
+# 'b3a8', and the screen was striped along x; every isolated 550 probe read back exact, so the XR10 composition path is avoided whole.
+# Original bytes checked against this IPSW's SystemOS cryptex (044-76034-038.dmg) shared cache: all match.
+text_fixups = [
+  "dyld_shared_cache_arm64.15,421e8bc,28ad1bb0008544f9,c0035fd6008544f9",
+  "dyld_shared_cache_arm64.13,1b05bec,44008052,24008052",
+  "dyld_shared_cache_arm64.13,1b05b08,44008052,24008052",
+  "BTAudioHALPlugin,38bec,ffc300d1f44f01a9,000080d2c0035fd6",
+  "dyld_shared_cache_arm64.31,40c448,4001899ac2fc1736e7ffff17,4001899ae8ffff17e7ffff17",
+  "dyld_shared_cache_arm64.03,27cfe84,f39c35f060423839c0010034,f39c35f07f423839c0010034",
+  "dyld_shared_cache_arm64.03,27cfebc,e8079f1a68423839e80740f9,e8079f1a7f423839e80740f9",
+  "dyld_shared_cache_arm64.03,272df00,08a2359000813039e00313aa,08a235901f813039e00313aa",
+  "dyld_shared_cache_arm64.03,272dea4,08a2359000412539e00313aa,08a235901f412539e00313aa",
+  "dyld_shared_cache_arm64.03,28d6ae4,490932b028013b39fd7bc1a8,490932b03f013b39fd7bc1a8",
+  "dyld_shared_cache_arm64.03,28d7b7c,4809329000813b39fd7bc1a8,480932901f813b39fd7bc1a8",
+  "dyld_shared_cache_arm64.03,28d7ce0,2900805209c12339c0035fd6,290080521fc12339c0035fd6",
+]
 
 [payload.adt]
-# chip_id/identity: REQUIRED from this board; never copy umi or T733 values.
-# Supply the board's identity seed through --unique-chip-id.
-chip_id = "207"
+# /chosen/chip-id is the Qualcomm SoC ID: live FDT qcom,msm-id <356 0x20001>, 356 = 0x164.
+chip_id = "0x164"
+# 768 MiB. The tablet's UEFI (firmware-t970 Upstream/gts7xlwifi/Memory/PlatformMemoryMap.c,
+# MEMORY_ENABLE=1) exposes only two conventional runs: DXE Heap 0xC0000000+0xDFC0000 and
+# "High RAM UNVALIDATED" 0x200000000+0x40000000; the rest of DRAM is reserved. DarwinBoot's
+# window must fit in the 1 GiB run next to the firmware's own allocations there: 4 GiB and
+# 1.5 GiB returned "Out of Resources" (2026-10-30); 512 MiB was placed at 0x20007C000 and
+# stopped after "exiting boot services" with nothing drawn.
+# 640 MiB from 2026-10-31: firmware-t970 opens 0xD0000000..0xFFC00000 as conventional memory (PlatformMemoryMap.c),
+# and DarwinBoot's first fit puts the window there, leaving room below 4 GiB for UEFI's own allocations. The kernel
+# then manages up to t970-dram-end and skips /chosen/t970-dram-holes (patches/xnu/t970-dram-holes.patch). If the
+# window does not fit, DarwinBoot falls back to the 1 GiB high run and the kernel stops at 2 GiB as before.
+owned_memory_size = "0x28000000"
+# The OS volume of the SHNGROOT image on sda39 (owner policy 04769D26, same image as alioth).
+root_match_volume_uuid = "04769D26-2CA0-4825-B443-E2E5F88300F2"
+# Passed only through --unique-chip-id / UNIXNU_UNIQUE_CHIP_ID from the ignored local.toml.
 unique_chip_id = "required"
+
+# /filesystems/DoNotUseSEP (empty), Apple's own development/no-SEP switch. The original APFS checks for it
+# before its guard: present, it logs insecure_boot_enabled and returns; absent, an unencrypted Data-role volume
+# panics "unencrypted data volume is not allowed" @apfs_vfsops.c:2276 (measured here 2026-10-31, v13). This
+# tablet has no SEP. The earlier S7plus-iPadOS route used the same node (native-apple-apfs-nosep-adt-prep).
+[adt.filesystems.bytes]
+DoNotUseSEP = ""
+
+# Device identity and display description for MobileGestalt, FrontBoard and SpringBoard, as UniXNU-alioth's board.toml
+# (520581a) carries them. Without them SpringBoard and contextstored trapped in FrontBoardServices +0xf744 on every launch
+# (v17c/v17d, 2026-10-31). The donor is iPad7,1 (J120); its native scale is 2, not alioth's 3 (a phone panel).
+[adt.root.string]
+model = "iPad7,1"
+target-type = "J120"
+
+[adt.chosen.u32]
+display-scale = 2
+
+# DRAM the kernel must not allocate inside its managed range: 0xFFC00000..0x10AD00000, Samsung's sec_debug carve-out
+# (live FDT /reserved-memory/sec_debug_rdx_bootdev@0, 0x100000000 + 0xAD00000) and the 4 MiB below it that the
+# Android kernel left out of System RAM. Pairs of little-endian u64 (base, size).
+[adt.chosen.bytes]
+# Sixteen slots: sec_debug, then fifteen empty ones the board's DarwinBoot fills from the UEFI memory map at hand-off with every
+# run the firmware still owns inside the managed range (firmware-t970 DarwinBoot.c T970ExportMemoryMap, also written to
+# EFI/UniXNU/t970-memmap.txt on the ESP). The firmware's own allocations there reset the tablet when the kernel used them (v53, v55).
+t970-dram-holes = "0000c0ff000000000000100b00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+
+[adt.product.string]
+product-name = "iPad Pro (12.9-inch) (2nd generation)"
+product-description = "iPad Pro (12.9-inch) (2nd generation)"
+artwork-device-idiom = "pad"
+# SDR sRGB panel path (UniXNU-sm-t733 display policy): MobileGestalt's hasExtendedColorDisplay compares this with P3.
+artwork-display-gamut = "sRGB"
+
+[adt.product.u32]
+artwork-device-subtype = 2732
+artwork-scale-factor = 2
+
+# Hold, volume down and volume up (package/ButtonProbe.cpp); the iPad Pro has no home button.
+[adt.buttons.string]
+compatible = "buttons"
+device_type = "buttons"
+
+[adt.buttons.strings]
+button-names = ["hold", "voldown", "volup"]
+
+[adt.buttons.u32]
+home-button-type = 2

@@ -1,3 +1,11 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Samsung Galaxy Tab S7+ Wi-Fi (SM-T970, gts7xlwifi), Qualcomm SM8250.
+//
+// Memory and reserved regions come from this tablet's live recovery FDT,
+// recorded in ../board-t970/hardware.json (2026-10-29), and the Samsung
+// kernel source pascua28/android_kernel_samsung_sm8250@159176c
+// (../native-kernel-source/upstream/arch/arm64/boot/dts/samsung/gts7xl/).
+
 /dts-v1/;
 /include/ "sm8250.dtsi"
 
@@ -5,13 +13,49 @@
     model = "Samsung Galaxy Tab S7+ Wi-Fi (SM-T970)";
     compatible = "samsung,gts7xlwifi", "qcom,sm8250";
 
-    // REQUIRED: one contiguous XNU range. Measured DRAM has three banks and
-    // 0xc0000000..0xd0000000 holds UEFI state; see ../board-t970/hardware.json.
-    memory@0 {
+    // One span from 0x80000000 to the end of the last bank, as UniXNU-alioth
+    // does. Measured banks: 0x80000000..0xbbb00000, 0xc0000000..0x180000000,
+    // 0x180000000..0x280000000. The hole at 0xbbb00000 and the UEFI state in
+    // 0xc0000000..0xd0000000 are not described here: the ADT reads only this
+    // node, and DarwinBoot takes its owned window from the UEFI memory map
+    // (GetMemoryMap + AllocateAddress), never from reserved descriptors.
+    memory@80000000 {
         device_type = "memory";
-        reg = <0 0 0 0>;
+        reg = <0 0x80000000 0x2 0x00000000>;
+    };
+
+    reserved-memory {
+        #address-cells = <2>;
+        #size-cells = <2>;
+        ranges;
+
+        // Live recovery FDT /reserved-memory/cont_splash_region@9c000000.
+        splash_region: splash_region@9c000000 {
+            reg = <0 0x9c000000 0 0x2300000>;
+            label = "cont_splash_region";
+        };
     };
 };
 
-// Set CPU status, reserved memory, peripheral wiring, and firmware inputs
-// from this board's hardware documentation.
+// All eight cores, as UniXNU-alioth (same SM8250) does. The E/P split is only valid
+// together with sm8250-common's native-smp-type-clusters.patch, which the SoC
+// patch series applies; without it a P core indexes past MAX_CPU_CLUSTERS.
+// Kryo 585 Silver cpu0-3 (Cortex-A55), Gold/Prime cpu4-7 (Cortex-A77).
+// The kernel uses the traditional/multiq scheduler, which keeps threads in the boot pset, so with this split the A77
+// cores run no user thread (v27). One cluster of eight (v28, 2026-10-31) put threads on them but stalled the boot at
+// ~123 processes with or without wfi=0. That was before any IPI was delivered: SPIs 1008..1015 are secure on the T970
+// (v45). Since v46 the IPIs use SPIs 544..551 (armcpu-spi-ipi-base) and reach the cores, so v49 tries one cluster again.
+&cpu0 { unixnu,cluster-type = "E"; unixnu,die-cluster-id = <0>; unixnu,cluster-core-id = <0>; };
+&cpu1 { unixnu,cluster-type = "E"; unixnu,die-cluster-id = <0>; unixnu,cluster-core-id = <1>; };
+&cpu2 { unixnu,cluster-type = "E"; unixnu,die-cluster-id = <0>; unixnu,cluster-core-id = <2>; };
+&cpu3 { unixnu,cluster-type = "E"; unixnu,die-cluster-id = <0>; unixnu,cluster-core-id = <3>; };
+// gts7xlwifi-next: the porting guide's platform step (E/P clusters, Edge scheduler keeps the UI on P) now that IPIs reach every core.
+// periph14: three scheduling clusters, 4 Silver (0) + 3 Gold (1) + 1 Prime (2) = the EPSS frequency domains (t970-three-clusters.patch).
+&cpu4 { unixnu,cluster-type = "P"; unixnu,die-cluster-id = <1>; unixnu,cluster-core-id = <0>; };
+&cpu5 { unixnu,cluster-type = "P"; unixnu,die-cluster-id = <1>; unixnu,cluster-core-id = <1>; };
+&cpu6 { unixnu,cluster-type = "P"; unixnu,die-cluster-id = <1>; unixnu,cluster-core-id = <2>; };
+&cpu7 { unixnu,cluster-type = "P"; unixnu,die-cluster-id = <2>; unixnu,cluster-core-id = <0>; };
+
+// Storage: the UFS host controller and PHY are disabled in sm8250.dtsi; ShengUfs binds to them.
+&ufs { status = "okay"; };
+&ufsphy { status = "okay"; };

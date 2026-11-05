@@ -1,0 +1,157 @@
+diff -ruN a/osfmk/conf/files b/osfmk/conf/files
+--- a/osfmk/conf/files	2026-11-01 10:57:55
++++ b/osfmk/conf/files	2026-11-01 10:59:56
+@@ -206,6 +206,7 @@
+ osfmk/kern/thread_act.c		standard
+ osfmk/kern/thread_call.c	standard
+ osfmk/kern/thread_group.c	standard
++osfmk/kern/t970_trace.c		standard
+ osfmk/kern/thread_policy.c	standard
+ osfmk/kern/timer.c			standard
+ osfmk/kern/timer_call.c		standard
+diff -ruN a/osfmk/kern/t970_trace.c b/osfmk/kern/t970_trace.c
+--- a/osfmk/kern/t970_trace.c	1970-01-01 01:00:00
++++ b/osfmk/kern/t970_trace.c	2026-11-01 11:06:11
+@@ -0,0 +1,142 @@
++/*
++ * gts7xlwifi: where the UI processes' threads are, for the boot log's [stacks] rows (package/BootLog.c). A frozen screen with the GPU
++ * idle and touches still arriving (v58, v60, v61) left no way to see what backboardd waited on. Per thread: id, state, the wait event
++ * and continuation (unslid, symbolicate against the unstripped kernel), the user PC/LR, and up to 8 kernel frames of a waiting thread
++ * that still owns a kernel stack. Read-only; frames are read only inside that stack.
++ */
++#include <kern/task.h>
++#include <kern/thread.h>
++#include <kern/locks.h>
++#include <arm64/proc_reg.h>
++#include <mach/arm/thread_status.h>
++#include <kern/misc_protos.h>
++#include <string.h>
++
++extern int proc_pid(struct proc *);
++extern char *proc_name_address(struct proc *);
++extern vm_offset_t kernel_stack_size;
++extern lck_mtx_t tasks_threads_lock;
++extern queue_head_t tasks;
++
++static const char *const t970_trace_names[4] = {"backboardd", "SpringBoard", "Preferences", "mediaserverd"};
++
++unsigned boot_ui_trace_role_rows(unsigned role, char rows[][120], unsigned capacity, unsigned limit);
++
++unsigned
++boot_ui_trace_role_rows(unsigned role, char rows[][120], unsigned capacity, unsigned limit)
++{
++	(void)limit;
++	if (role >= 4 || !capacity || ml_at_interrupt_context() || !ml_get_interrupts_enabled()) {
++		return 0;
++	}
++	unsigned n = 0;
++	task_t task;
++	lck_mtx_lock(&tasks_threads_lock);
++	queue_iterate(&tasks, task, task_t, tasks) {
++		struct proc *p = get_bsdtask_info(task);
++		const char *name = p ? proc_name_address(p) : NULL;
++		if (!name || strncmp(name, t970_trace_names[role], 32)) {
++			continue;
++		}
++		task_lock(task);
++		snprintf(rows[n++], 120, "[stk] %s pid %d threads %d", name, proc_pid(p), task->thread_count);
++		thread_t thread;
++		queue_iterate(&task->threads, thread, thread_t, task_threads) {
++			if (n >= capacity) {
++				break;
++			}
++			uint64_t upc = 0, ulr = 0;
++			if (thread->machine.upcb) {
++				upc = get_saved_state_pc(thread->machine.upcb);
++				ulr = get_saved_state_lr(thread->machine.upcb);
++			}
++			int at = snprintf(rows[n], 120, "T%llx s%x w%llx c%llx u%llx/%llx", thread->thread_id, thread->state,
++			    (unsigned long long)VM_KERNEL_UNSLIDE(thread->wait_event),
++			    (unsigned long long)VM_KERNEL_UNSLIDE(thread->continuation), upc, ulr);
++			const vm_offset_t stack = thread->kernel_stack;
++			if ((thread->state & TH_WAIT) && !(thread->state & TH_RUN) && stack && thread->machine.kstackptr) {
++				const struct arm_kernel_saved_state *ss = &((thread_kernel_state_t)thread->machine.kstackptr)->machine.ss;
++				uint64_t fp = ss->fp, lr = ss->lr;
++				at += snprintf(rows[n] + at, 120 - at, " K%llx", (unsigned long long)VM_KERNEL_UNSLIDE(lr));
++				for (int f = 0; f < 8 && at < 106; f++) {
++					if (fp < stack || fp + 16 > stack + kernel_stack_size || (fp & 7)) {
++						break;
++					}
++					const uint64_t *frame = (const uint64_t *)fp;
++					lr = frame[1];
++					fp = frame[0];
++					if (!lr) {
++						break;
++					}
++					at += snprintf(rows[n] + at, 120 - at, "/%llx", (unsigned long long)(VM_KERNEL_UNSLIDE(lr) & 0xfffffff));
++				}
++			}
++			n++;
++		}
++		task_unlock(task);
++		break;
++	}
++	lck_mtx_unlock(&tasks_threads_lock);
++	return n;
++}
++
++/*
++ * gts7xlwifi: the thread that holds a kernel mutex (the GPU driver's global lock, NativeAdrenoPublish.cpp g.lock), in the same row format.
++ * v89 froze with backboardd waiting for that lock in AGXDeviceUserClient::runTimed and a BO release stopped at close step 35; this names
++ * the holder and its kernel frames. Row 0: "[lock] state <word> owner <tid> pid <pid> <name>", row 1: the thread.
++ */
++#include <kern/lock_mtx.h>
++unsigned boot_ui_trace_mutex_owner_rows(const void *mutex, char rows[][120], unsigned capacity);
++
++unsigned
++boot_ui_trace_mutex_owner_rows(const void *mutex, char rows[][120], unsigned capacity)
++{
++	if (!mutex || capacity < 2 || ml_at_interrupt_context() || !ml_get_interrupts_enabled()) {
++		return 0;
++	}
++	const lck_mtx_t *m = (const lck_mtx_t *)mutex;
++	const uint32_t state = os_atomic_load(&m->lck_mtx.data, relaxed);
++	const ctid_t ctid = state & LCK_MTX_CTID_MASK;
++	if (!ctid) {
++		snprintf(rows[0], 120, "[lock] state %08x free", state);
++		return 1;
++	}
++	thread_t thread = ctid_get_thread_unsafe(ctid);
++	if (!thread) {
++		snprintf(rows[0], 120, "[lock] state %08x owner ctid %x gone", state, ctid);
++		return 1;
++	}
++	task_t task = get_threadtask(thread);
++	struct proc *p = task ? get_bsdtask_info(task) : NULL;
++	const char *name = p ? proc_name_address(p) : "kernel";
++	const processor_t last = thread->last_processor;
++	snprintf(rows[0], 120, "[lock] state %08x owner T%llx pid %d %.24s cpu %d pri %d", state, thread->thread_id, p ? proc_pid(p) : 0,
++	    name ? name : "?", last ? last->cpu_id : -1, thread->sched_pri);
++	uint64_t upc = 0, ulr = 0;
++	if (thread->machine.upcb) {
++		upc = get_saved_state_pc(thread->machine.upcb);
++		ulr = get_saved_state_lr(thread->machine.upcb);
++	}
++	int at = snprintf(rows[1], 120, "T%llx s%x w%llx c%llx u%llx/%llx", thread->thread_id, thread->state,
++	    (unsigned long long)VM_KERNEL_UNSLIDE(thread->wait_event),
++	    (unsigned long long)VM_KERNEL_UNSLIDE(thread->continuation), upc, ulr);
++	const vm_offset_t stack = thread->kernel_stack;
++	if ((thread->state & TH_WAIT) && !(thread->state & TH_RUN) && stack && thread->machine.kstackptr) {
++		const struct arm_kernel_saved_state *ss = &((thread_kernel_state_t)thread->machine.kstackptr)->machine.ss;
++		uint64_t fp = ss->fp, lr = ss->lr;
++		at += snprintf(rows[1] + at, 120 - at, " K%llx", (unsigned long long)VM_KERNEL_UNSLIDE(lr));
++		for (int f = 0; f < 8 && at < 106; f++) {
++			if (fp < stack || fp + 16 > stack + kernel_stack_size || (fp & 7)) {
++				break;
++			}
++			const uint64_t *frame = (const uint64_t *)fp;
++			lr = frame[1];
++			fp = frame[0];
++			if (!lr) {
++				break;
++			}
++			at += snprintf(rows[1] + at, 120 - at, "/%llx", (unsigned long long)(VM_KERNEL_UNSLIDE(lr) & 0xfffffff));
++		}
++	}
++	return 2;
++}
