@@ -210,6 +210,7 @@ completion = ["The Mac enumerates Qualcomm XNU Debug and streams the log from bo
 limits = ["No Apple USB device stack (Finder/usbmux)."]
 next_action = ["Port an IOUSBDeviceFamily DWC3 controller (UniXNU-alioth AliothUSBDevice)."]
 evidence = [
+  {kind = "device", reference = "docs/evidence/periph17-wifi.txt", result = "Wi-Fi checkpoint row [t970 wifi dom] is composed live by the boot-log slot writer, so it survives a stalled monitor.", command = "TWRP: python3 tools/read-boot-log.py --port <adb serial> (periph17 payload)", revision = "cf6ed1702d3ddc2ace4cc988b982117e77f32c0b"},
   {kind = "device", reference = "docs/evidence/usb-console.txt", result = "QCOM XNU USB CDC ACM v1 and live rows on /dev/cu.usbmodem1101.", command = "macOS: read /dev/cu.usbmodem* while the periph15 payload runs", revision = "781e3528e2d5e0dc0c9c6fa1e409f5a4bc1cf0e2"},
   {kind = "device", reference = "docs/evidence/periph15-bootlog.txt", result = "[t970 muic] CONTROL1 0x3f -> 0x09; QCOM USB ACTIVE (CDC-ACM up).", command = "TWRP: python3 tools/read-boot-log.py --port <adb serial> --out logs (after booting the periph15 payload, docs/menu/unixnu.toml)", revision = "781e3528e2d5e0dc0c9c6fa1e409f5a4bc1cf0e2"},
 ]
