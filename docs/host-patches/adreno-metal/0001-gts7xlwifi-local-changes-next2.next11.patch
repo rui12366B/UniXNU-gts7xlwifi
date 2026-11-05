@@ -1,0 +1,207 @@
+From 984504898ffbabda8aff041da8812c3b7a9f1ac9 Mon Sep 17 00:00:00 2001
+From: t970 <gts7xlwifi@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 06:01:27 +0000
+Subject: [PATCH 1/7] gts7xlwifi: local changes (next2..next11)
+
+---
+ GpuScanoutPresenter.h        | 41 ++++++++++++++++++++++--
+ NativeAdrenoMetalPlugin.mm   |  2 +-
+ NativeBridgeMetalFrontend.mm |  5 ++-
+ bridge/NativeMetalObjects.rs |  5 +--
+ shaders/scanout_convert.ll   | 62 +++++++++++++++++++++++++++++++++++-
+ 5 files changed, 108 insertions(+), 7 deletions(-)
+
+diff --git a/GpuScanoutPresenter.h b/GpuScanoutPresenter.h
+index 8c64a98..f3b56dd 100644
+--- a/GpuScanoutPresenter.h
++++ b/GpuScanoutPresenter.h
+@@ -55,6 +55,7 @@ public:
+     Result present(const Frame &frame) {
+         if (!ready()) return kBadScanout;
+         if (frame.format == NGP_RGBA16F_LINEAR || frame.format == NGP_RGBA16F_ENCODED) return convert(frame);
++        if (frame.format == NGP_XR10) return convertXr(frame);
+         if (frame.format != NGP_BGRX8888) return kBadFrame;
+         const size_t page = (size_t)getpagesize(), row = (size_t)frame.width * 4;
+         if (!frame.base || ((uintptr_t)frame.base & (page - 1)) || !frame.bytes || (frame.bytes & (page - 1)) ||
+@@ -132,6 +133,41 @@ public:
+         [commands waitUntilCompleted];
+         return commands.status == MTLCommandBufferStatusCompleted ? kOk : kGpuFailed;
+     }
++    // gts7xlwifi: plane 0 of a 'b3a8' frame (32-bit BGR10 XR, rows of width*4 bytes at frame.stride), one thread per pixel.
++    Result convertXr(const Frame &frame) {
++        const size_t page = (size_t)getpagesize(), row = (size_t)frame.width * 4;
++        if (!frame.base || ((uintptr_t)frame.base & (page - 1)) || !frame.bytes || (frame.bytes & (page - 1)) ||
++            frame.width != scanout_.width || frame.height != scanout_.height || frame.stride < row || (frame.stride & 3) ||
++            (scanout_.stride & 3) || frame.stride * (frame.height - 1) + row > frame.bytes) return kBadFrame;
++        if (!pipeline(xr_, xrFailed_, @"scanout_xr") || !xrTable()) return kNoResource;
++        id<MTLBuffer> source = sourceFor(frame);
++        if (!source) return kNoResource;
++        id<MTLCommandBuffer> commands = [queue_ commandBuffer];
++        id<MTLComputeCommandEncoder> encoder = commands ? [commands computeCommandEncoder] : nil;
++        if (!encoder) return kNoResource;
++        const uint32_t params[4] = {frame.width, frame.height, (uint32_t)(frame.stride / 4), (uint32_t)(scanout_.stride / 4)};
++        [encoder setComputePipelineState:xr_];
++        [encoder setBuffer:source offset:0 atIndex:0];
++        [encoder setBuffer:target_ offset:0 atIndex:1];
++        [encoder setBuffer:xrTable_ offset:0 atIndex:2];
++        [encoder setBytes:params length:sizeof params atIndex:3];
++        [encoder dispatchThreadgroups:MTLSizeMake((frame.width + 15) / 16, (frame.height + 7) / 8, 1)
++                threadsPerThreadgroup:MTLSizeMake(16, 8, 1)];
++        [encoder endEncoding];
++        [commands commit];
++        [commands waitUntilCompleted];
++        return commands.status == MTLCommandBufferStatusCompleted ? kOk : kGpuFailed;
++    }
++    // The 8-bit code of every 10-bit XR channel value (1024 words): 384..894 is 0..1, as the display driver's convertXrRows rounds it.
++    id<MTLBuffer> xrTable() {
++        if (xrTable_) return xrTable_;
++        id<MTLBuffer> buffer = [device_ newBufferWithLength:1024 * sizeof(uint32_t) options:MTLResourceStorageModeShared];
++        if (!buffer) return nil;
++        uint32_t *codes = (uint32_t *)buffer.contents;
++        for (int c = 0; c < 1024; ++c) {const int v = (c - 384) * 255 / 510; codes[c] = (uint32_t)(v < 0 ? 0 : v > 255 ? 255 : v);}
++        xrTable_ = buffer;
++        return buffer;
++    }
+     // A kernel of the scanout library, made once; a failure is not retried (every later half-float frame then goes back to the display
+     // driver's own path, every BGRA frame to the blit).
+     bool pipeline(__strong id<MTLComputePipelineState> &state, bool &failed, NSString *name) {
+@@ -187,8 +223,9 @@ private:
+     Scanout scanout_;
+     id<MTLCommandQueue> queue_;
+     id<MTLBuffer> target_;
+-    id<MTLComputePipelineState> convert_ = nil, opaque_ = nil;
+-    bool convertFailed_ = false, opaqueFailed_ = false;
++    id<MTLComputePipelineState> convert_ = nil, opaque_ = nil, xr_ = nil;
++    bool convertFailed_ = false, opaqueFailed_ = false, xrFailed_ = false;
++    id<MTLBuffer> xrTable_ = nil;
+     id<MTLBuffer> tables_[2] = {nil, nil};
+     Source sources_[kSources] = {};
+     uint64_t uses_ = 0;
+diff --git a/NativeAdrenoMetalPlugin.mm b/NativeAdrenoMetalPlugin.mm
+index 415e9c8..f24ab9b 100644
+--- a/NativeAdrenoMetalPlugin.mm
++++ b/NativeAdrenoMetalPlugin.mm
+@@ -96,7 +96,7 @@ static bool bootArgSet(const char *key) {
+     size_t size = sizeof args - 1;
+     return sysctlbyname("kern.bootargs", args, &size, nullptr, 0) == 0 && strstr(args, key);
+ }
+-static unsigned patchFramebufferBranch(uintptr_t slide) {
++__attribute__((unused)) static unsigned patchFramebufferBranch(uintptr_t slide) {  // iPadOS 27 addresses: unused in the ios (17) build
+     const uintptr_t site = 0x184461928 + slide;
+     uint32_t word = 0;
+     if (!readTask(site, &word, sizeof word)) return 0x6E40;
+diff --git a/NativeBridgeMetalFrontend.mm b/NativeBridgeMetalFrontend.mm
+index aec500d..bd1ecbd 100644
+--- a/NativeBridgeMetalFrontend.mm
++++ b/NativeBridgeMetalFrontend.mm
+@@ -4506,7 +4506,10 @@ static void installAnswers(Class cls) {
+    // Extended-range 10-bit (XR10) framebuffers are withheld: this display chain presents 8-bit BGRX scanout only. The render server picks its
+    // wide-gamut 64-bit (and Apple-compressed) framebuffer when a device offers them, and the display driver could not show it (int-089: the
+    // swap's surface was '&w4a', 8 bytes per pixel, and every swap was refused).
+-   if(!strcmp(name,"supportsExtendedXR10Formats") && (!strstr(getprogname(),"Poster") || !strcmp(getprogname(),"PosterBoard")))value=0;
++   // gts7xlwifi (iPadOS 17): withheld from the wallpaper's Poster extensions too. One XR10 layer turned the whole framebuffer into 'b3a8'
++   // (next2: every swap two-plane XR10, so neither the GPU hand-off copy nor direct scanout took a frame, the CPU converted each one in
++   // 79 ms, and the panel showed the wallpaper smeared into stripes). v95's plugin withheld it from every process.
++   if(!strcmp(name,"supportsExtendedXR10Formats"))value=0;
+    gAnswers[sel]=value;
+    class_addMethod(cls,sel,kind==NMB_ANSWER_COUNT?(IMP)countAnswer:(IMP)flagAnswer,kind==NMB_ANSWER_COUNT?"Q16@0:8":"B16@0:8");
+    break;
+diff --git a/bridge/NativeMetalObjects.rs b/bridge/NativeMetalObjects.rs
+index ccea667..0bc7763 100644
+--- a/bridge/NativeMetalObjects.rs
++++ b/bridge/NativeMetalObjects.rs
+@@ -527,8 +527,9 @@ const PUBLIC_ANSWERS: &[(&str, u32)] = &[
+     ("argumentBuffersSupport", 0),
+     ("readWriteTextureSupport", 0),
+     ("maxColorAttachments", 0),
+-    ("minConstantBufferAlignmentBytes", 0),
+-    ("deviceLinearReadOnlyTextureAlignmentBytes", 0),
++    // gts7xlwifi (A650, iPadOS 17): not answered, as v95's bridge (FFT-infra 82e9561) did not answer them. With a device answer Core
++    // Animation laid out its constant buffers at 4 bytes and its read-only linear textures at Turnip's 64 (UniXNU-asteroids T79..T80o
++    // found the 64-byte layout scrambling textures), and next2..next8 drew every frame smeared along its rows; Metal's own answers stay.
+     ("areRasterOrderGroupsSupported", 1),
+     ("supportsRasterOrderGroups", 1),
+     ("isDepth24Stencil8PixelFormatSupported", 1),
+diff --git a/shaders/scanout_convert.ll b/shaders/scanout_convert.ll
+index 010993b..a6a94e2 100644
+--- a/shaders/scanout_convert.ll
++++ b/shaders/scanout_convert.ll
+@@ -106,10 +106,69 @@ done:
+   ret void
+ }
+ 
++; scanout_xr (gts7xlwifi): plane 0 of a 'b3a8' frame (32-bit BGR10 extended range) to the scanout's BGRX rows, one thread per pixel. Each
++; 10-bit channel indexes a 1024-entry table of 8-bit codes, the display driver's convertXrRows rounding ((c - 384) * 255 / 510, clamped).
++;   kernel void scanout_xr(device const uint *src [[buffer(0)]], device uint *dst [[buffer(1)]],
++;                          device const uint *table [[buffer(2)]], constant uint4 &p [[buffer(3)]],
++;                          uint2 gid [[thread_position_in_grid]])
++define void @scanout_xr(ptr addrspace(1) noundef readonly "air-buffer-no-alias" %src, ptr addrspace(1) noundef "air-buffer-no-alias" %dst, ptr addrspace(1) noundef readonly "air-buffer-no-alias" %table, ptr addrspace(2) noundef readonly align 16 dereferenceable(16) "air-buffer-no-alias" %p, <2 x i32> noundef %gid) local_unnamed_addr #0 {
++entry:
++  %w = load i32, ptr addrspace(2) %p, align 16
++  %ph = getelementptr inbounds i32, ptr addrspace(2) %p, i64 1
++  %h = load i32, ptr addrspace(2) %ph, align 4
++  %pss = getelementptr inbounds i32, ptr addrspace(2) %p, i64 2
++  %ss = load i32, ptr addrspace(2) %pss, align 8
++  %pds = getelementptr inbounds i32, ptr addrspace(2) %p, i64 3
++  %ds = load i32, ptr addrspace(2) %pds, align 4
++  %x = extractelement <2 x i32> %gid, i64 0
++  %y = extractelement <2 x i32> %gid, i64 1
++  %inx = icmp ult i32 %x, %w
++  %iny = icmp ult i32 %y, %h
++  %in = and i1 %inx, %iny
++  br i1 %in, label %body, label %done
++
++body:
++  %x64 = zext i32 %x to i64
++  %y64 = zext i32 %y to i64
++  %ss64 = zext i32 %ss to i64
++  %srow = mul i64 %y64, %ss64
++  %si = add i64 %srow, %x64
++  %sp = getelementptr inbounds i32, ptr addrspace(1) %src, i64 %si
++  %v = load i32, ptr addrspace(1) %sp, align 4
++  %b = and i32 %v, 1023
++  %g0 = lshr i32 %v, 10
++  %g = and i32 %g0, 1023
++  %r0 = lshr i32 %v, 20
++  %r = and i32 %r0, 1023
++  %r64 = zext i32 %r to i64
++  %g64 = zext i32 %g to i64
++  %b64 = zext i32 %b to i64
++  %rp = getelementptr inbounds i32, ptr addrspace(1) %table, i64 %r64
++  %gp = getelementptr inbounds i32, ptr addrspace(1) %table, i64 %g64
++  %bp = getelementptr inbounds i32, ptr addrspace(1) %table, i64 %b64
++  %rv = load i32, ptr addrspace(1) %rp, align 4
++  %gv = load i32, ptr addrspace(1) %gp, align 4
++  %bv = load i32, ptr addrspace(1) %bp, align 4
++  %rs = shl i32 %rv, 16
++  %gs = shl i32 %gv, 8
++  %rg = or i32 %rs, %gs
++  %rgb = or i32 %rg, %bv
++  %px = or i32 %rgb, -16777216
++  %ds64 = zext i32 %ds to i64
++  %drow = mul i64 %y64, %ds64
++  %di = add i64 %drow, %x64
++  %dp = getelementptr inbounds i32, ptr addrspace(1) %dst, i64 %di
++  store i32 %px, ptr addrspace(1) %dp, align 4
++  br label %done
++
++done:
++  ret void
++}
++
+ attributes #0 = { mustprogress nofree norecurse nosync nounwind willreturn "frame-pointer"="all" "min-legal-vector-width"="0" "no-builtins" "no-trapping-math"="true" "stack-protector-buffer-size"="8" }
+ 
+ !llvm.module.flags = !{!0, !1, !2, !3, !4, !5, !6, !7, !8}
+-!air.kernel = !{!9, !22}
++!air.kernel = !{!9, !22, !26}
+ !air.compile_options = !{!17, !18}
+ !llvm.ident = !{!19}
+ !air.version = !{!20}
+@@ -141,3 +200,4 @@ attributes #0 = { mustprogress nofree norecurse nosync nounwind willreturn "fram
+ !23 = !{!12, !13, !25, !24}
+ !24 = !{i32 3, !"air.thread_position_in_grid", !"air.arg_type_name", !"uint2", !"air.arg_name", !"gid"}
+ !25 = !{i32 2, !"air.buffer", !"air.buffer_size", i32 16, !"air.location_index", i32 3, i32 1, !"air.read", !"air.address_space", i32 2, !"air.arg_type_size", i32 16, !"air.arg_type_align_size", i32 16, !"air.arg_type_name", !"uint4", !"air.arg_name", !"p"}
++!26 = !{ptr @scanout_xr, !10, !11}
+-- 
+2.54.0 (Apple Git-157)
+

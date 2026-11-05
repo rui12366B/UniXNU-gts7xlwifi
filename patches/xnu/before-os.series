@@ -1,0 +1,5 @@
+# Applied between the SoC and OS series. The OS profile's zzz-boot-progress.patch adds
+# progress markers around the XNU_SHENG_PMGR block in bsd_init.c, which only this patch
+# creates; it is six lines behind #if XNU_SHENG_PMGR, so with PMGR off it compiles to
+# nothing. unixnu-sm-t733 carries it in its arm64 series the same way.
+arch:../../../patches/xnu/sheng-platform-power.patch

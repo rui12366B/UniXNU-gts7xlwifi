@@ -1,0 +1,114 @@
+From a72f57aaaa08cd7057625fa5a5b31945b3b20ccb Mon Sep 17 00:00:00 2001
+From: t970 <gts7xlwifi@users.noreply.github.com>
+Date: Thu, 5 Nov 2026 08:58:48 +0000
+Subject: [PATCH 5/7] gts7xlwifi: XR10 probe (debug/xr10-probe.metallib) and
+ BootLog rows from the plugin
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ NativeAdrenoMetalPlugin.mm | 75 ++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 75 insertions(+)
+
+diff --git a/NativeAdrenoMetalPlugin.mm b/NativeAdrenoMetalPlugin.mm
+index 362415e..2297bb4 100644
+--- a/NativeAdrenoMetalPlugin.mm
++++ b/NativeAdrenoMetalPlugin.mm
+@@ -8,6 +8,8 @@
+ // gets its own native device too (its own driver connection, GPU address space and shader cache), as every process does with Apple's
+ // own GPU plugin.
+ #import <Foundation/Foundation.h>
++#import <Metal/Metal.h>
++#include <math.h>
+ #include "SharedShaderCache.h"
+ #include <pthread.h>
+ #include <thread>
+@@ -26,6 +28,65 @@
+ #include "NativeTurnipSwapTest.h"
+ #include "NativeGpuTrace.h"
+ #include "NativeMetalBridgePhase.h"
++
++// gts7xlwifi: one BootLog row (native_adreno_metal_rows[row], 95 characters) through the marker stream: 0xC000 | row selects and clears
++// the row, then 0x8000 | c1 << 7 | c2 appends two 7-bit characters (NativeAdrenoPublish.cpp).
++static void t970Row(Gpu &gpu, unsigned row, const char *text) {
++    gpu.mark(0xC000 | (row & 0x3f));
++    for (size_t i = 0; text[i]; i += 2) {
++        const unsigned a = (unsigned char)text[i] & 0x7f, b = text[i + 1] ? ((unsigned char)text[i + 1] & 0x7f) : 0;
++        gpu.mark(0x8000 | a << 7 | b);
++        if (!text[i + 1]) break;
++    }
++}
++// gts7xlwifi: the stripes (2026-11-05) sit in how RGB10A8_2P_XR10 (550) textures are sampled. A 64x2 texture whose red code is 384 + 8x
++// (R = 8x/510: x 4 20 36 60 -> 0.063 0.314 0.565 0.941), the probe kernel's linear and nearest samples, its read() and its get_width/height,
++// written into row 47: "X w<width> h<height> L a b c d N a b c d R a b c d" (values x1000). Row 46: what was made or refused.
++static void t970Xr10Probe(Gpu &gpu, id<MTLDevice> device) {
++    char text[100];
++    if (!device) {t970Row(gpu, 47, "X no device"); return;}
++    NSError *error = nil;
++    id<MTLLibrary> library = [device newLibraryWithURL:[NSURL fileURLWithPath:@"/private/var/ngpu/debug/xr10-probe.metallib"] error:&error];
++    id<MTLFunction> function = [library newFunctionWithName:@"xr10_probe"];
++    id<MTLComputePipelineState> pipeline = function ? [device newComputePipelineStateWithFunction:function error:&error] : nil;
++    if (!pipeline) {
++        snprintf(text, sizeof text, "X pipeline lib %d fn %d: %.60s", library != nil, function != nil, error.localizedDescription.UTF8String ?: "");
++        t970Row(gpu, 47, text);
++        return;
++    }
++    const NSUInteger width = 64, height = 2;
++    for (int pass = 0; pass < 2; ++pass) {
++        // pass 0: format 550 (the layers' format); pass 1: 554 BGR10_XR (single plane), to tell the two-plane path from the XR10 decode
++        const MTLPixelFormat format = (MTLPixelFormat)(pass ? 554 : 550);
++        MTLTextureDescriptor *d = [(id)NSClassFromString(@"MTLTextureDescriptor") texture2DDescriptorWithPixelFormat:format width:width height:height mipmapped:NO];
++        d.usage = MTLTextureUsageShaderRead;
++        d.storageMode = MTLStorageModeShared;
++        id<MTLTexture> texture = [device newTextureWithDescriptor:d];
++        if (!texture) {snprintf(text, sizeof text, "X f%lu refused", (unsigned long)format); t970Row(gpu, 46 - pass, text); continue;}
++        uint32_t words[64 * 2];
++        for (NSUInteger y = 0; y < height; ++y)
++            for (NSUInteger x = 0; x < width; ++x) words[y * width + x] = (uint32_t)(384 + 8 * x) << 20 | (uint32_t)(384 + 255) << 10 | 384u;
++        [texture replaceRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0 withBytes:words bytesPerRow:width * 4];
++        id<MTLBuffer> out = [device newBufferWithLength:16 * sizeof(float) options:MTLResourceStorageModeShared];
++        memset(out.contents, 0xff, 16 * sizeof(float));
++        id<MTLCommandQueue> queue = [device newCommandQueue];
++        id<MTLCommandBuffer> commands = [queue commandBuffer];
++        id<MTLComputeCommandEncoder> encoder = [commands computeCommandEncoder];
++        [encoder setComputePipelineState:pipeline];
++        [encoder setTexture:texture atIndex:0];
++        [encoder setBuffer:out offset:0 atIndex:0];
++        [encoder dispatchThreads:MTLSizeMake(4, 1, 1) threadsPerThreadgroup:MTLSizeMake(4, 1, 1)];
++        [encoder endEncoding];
++        [commands commit];
++        [commands waitUntilCompleted];
++        const float *v = (const float *)out.contents;
++        auto k = [&](unsigned i) {return (int)lrintf(v[i] * 1000.0f);};
++        snprintf(text, sizeof text, "X f%lu e%ld w%d h%d L %d %d %d %d N %d %d %d %d R %d %d %d %d", (unsigned long)format,
++                 (long)(commands.error ? commands.error.code : 0), (int)v[3], (int)v[7], k(0), k(4), k(8), k(12), k(1), k(5), k(9), k(13),
++                 k(2), k(6), k(10), k(14));
++        t970Row(gpu, 47 - pass * 2, text);
++    }
++}
+ #include "CacheExport.h"
+ #include "PrimeShaders.h"
+ #include "ExceptionDiag.h"
+@@ -402,6 +463,20 @@ static id deviceForPort(unsigned port) {
+             return nil;
+         }
+         gpu->mark(0x6802);
++        // gts7xlwifi: the XR10 probe (once, when /private/var/ngpu/debug/xr10-probe.metallib exists), on its own thread.
++        if (access("/private/var/ngpu/debug/xr10-probe.metallib", R_OK) == 0) {
++            pthread_t probe;
++            pthread_attr_t probeAttributes;
++            pthread_attr_init(&probeAttributes);
++            pthread_attr_setdetachstate(&probeAttributes, PTHREAD_CREATE_DETACHED);
++            pthread_create(&probe, &probeAttributes, [](void *arg) -> void * {
++                sleep(5);
++                @autoreleasepool {@try {t970Xr10Probe(*static_cast<Gpu *>(arg), device);} @catch (NSException *exception) {
++                    t970Row(*static_cast<Gpu *>(arg), 47, "X exception");}}
++                return nullptr;
++            }, gpu);
++            pthread_attr_destroy(&probeAttributes);
++        }
+         // The display hand-off client on its own thread: it only serves, not the discovery.
+         pthread_t scanout;
+         pthread_attr_t attributes;
+-- 
+2.54.0 (Apple Git-157)
+

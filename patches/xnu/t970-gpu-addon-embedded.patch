@@ -1,0 +1,26 @@
+--- a/bsd/kern/kern_exec.c	2026-10-31 20:13:53
++++ b/bsd/kern/kern_exec.c	2026-10-31 20:13:53
+@@ -7265,6 +7265,10 @@
+  * created. A malformed addon is refused as a whole; a file that cannot be written keeps its old content.
+  * Counters for the boot log: files in the addon (-1 none), files written, files already equal, failures and the last error. */
+ extern int native_ram_block_gpu_addon(const uint8_t **, uint64_t *) __attribute__((weak_import));
++/* gts7xlwifi: the board's DarwinBoot hands no GpuAddon over, so the kernel image carries the addon
++ * (package/T970GpuAddon.S, the bytes of scripts/make-gpu-addon.py's output) and is used when the loader gave none. */
++extern const uint8_t t970_gpu_addon_data[] __attribute__((weak_import));
++extern const uint64_t t970_gpu_addon_size __attribute__((weak_import));
+ #include <libkern/zlib.h>
+ /* zlib's state, from kalloc with its size in front (the default allocator of the kernel's zlib is not meant for this). */
+ static voidpf
+@@ -7401,7 +7405,11 @@
+ 	const uint8_t *addon = NULL;
+ 	uint64_t bytes = 0;
+ 	if (!native_ram_block_gpu_addon || !native_ram_block_gpu_addon(&addon, &bytes)) {
+-		return;
++		if (!t970_gpu_addon_data || !&t970_gpu_addon_size || !t970_gpu_addon_size) {
++			return;
++		}
++		addon = t970_gpu_addon_data;
++		bytes = t970_gpu_addon_size;
+ 	}
+ 	uint32_t count = 0;
+ 	uint64_t total = 0;

@@ -1,0 +1,29 @@
+From 10f6db47a6c7ea48825242da1f0e0c4fffdabcd6 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E4=B9=9D=E9=94=90?= <gts7xlwifi@users.noreply.github.com>
+Date: Thu, 5 Nov 2026 08:58:48 +0000
+Subject: [PATCH 4/7] Revert "gts7xlwifi: refuse textures over b3a8 surfaces
+ (next14)"
+
+This reverts commit a1efbd3436defc216e71ccedfb30a40282dabb18.
+---
+ NativeBridgeMetalFrontend.mm | 4 ----
+ 1 file changed, 4 deletions(-)
+
+diff --git a/NativeBridgeMetalFrontend.mm b/NativeBridgeMetalFrontend.mm
+index 5508cfa..bd1ecbd 100644
+--- a/NativeBridgeMetalFrontend.mm
++++ b/NativeBridgeMetalFrontend.mm
+@@ -4177,10 +4177,6 @@ - (id)newTextureLayoutWithDescriptor:(MTLTextureDescriptor *)d isHeapOrBufferBac
+  // the plane's own address and rows. Only a plain surface has no planes, and then only plane 0 exists.
+  const size_t planes=surface?IOSurfaceGetPlaneCount(surface):0;
+  if(!surface || !d || (planes?plane>=planes:plane!=0)){refuseSurface(1,surface,d,plane,0,0);return nil;}
+- // gts7xlwifi (A650, iPadOS 17): no texture over a two-plane extended-range 'b3a8' surface. The runtime holds one as an R32G32 shadow
+- // whose rows a kernel copies back into the two planes, and on this GPU every row came back as one colour (next2..next13: the whole
+- // panel smeared along its rows, GMEM or sysmem, either Turnip). Refused, the render server keeps the BGRA framebuffer v95 showed.
+- if(IOSurfaceGetPixelFormat(surface)==0x62336138){refuseSurface(1,surface,d,plane,0,0);return nil;}
+  const uint64_t rotation=textureRotation(d);if(rotation<5)gSurfaceRotations[rotation]++;
+  if(planes)gSurfacePlanar++;
+  void *base=IOSurfaceGetBaseAddress(surface);const size_t page=(size_t)getpagesize(),allocation=IOSurfaceGetAllocSize(surface);
+-- 
+2.54.0 (Apple Git-157)
+

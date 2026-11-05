@@ -1,0 +1,23 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7995,13 +7995,13 @@
+ 	/* The typed provider's disk may be far larger than 2 GiB (a persistent Data disk keeps only its seed's nonzero pages). */
+ 	if (!size || size > UINT64_C(0x10000000000) || (size & 4095)) goto done;
+ #else
+-	device = mdevlookup(0);
+-	if (device == NODEV || mdevgetrange(0, &base, &size) || base < VM_MIN_KERNEL_ADDRESS ||
+-	    !size || size > UINT64_C(0x80000000) || (base & 4095) || (size & 4095)) goto done;
+-	SHA256_CTX context;
+-	SHA256_Init(&context);
+-	SHA256_Update(&context, (const void *)base, size);
+-	SHA256_Final(native_owner_data_seed_sha256, &context);
++	/* gts7xlwifi: the Data volume of the persistent APFS container that ShengUfs publishes after the root
++	 * image on the former Windows partition (t970-ufs-data=1, writable with ufsrw=1). Not a RAM seed:
++	 * base and the seed digest stay zero, size is the container's bytes. */
++	extern int t970_ufs_data_volume(const char *, dev_t *, char *, size_t, uint64_t *);
++	if (t970_ufs_data_volume("5915374F-7A58-4BD3-9C6F-0BD63348ACEA", &device, device_path,
++	    sizeof(device_path), &size)) { error = ENOENT; goto done; }
++	if (device == NODEV || !size || (size & 4095)) goto done;
+ #endif
+ 	native_owner_data_seed_base = base;
+ 	native_owner_data_seed_size = size;

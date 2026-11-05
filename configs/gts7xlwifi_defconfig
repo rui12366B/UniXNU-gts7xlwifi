@@ -4,6 +4,62 @@ CONFIG_XNU_SOURCE_CORECRYPTO14=y
 CONFIG_XNU_SOURCE_PTHREAD=y
 CONFIG_XNU_ARM_DT_PLATFORM=y
 CONFIG_XNU_ARMCPU=y
+# SM8250 (kona) implements ARMv8.1 PAN: copyin/copyout must manage it at the exception entry
+# (same as UniXNU-alioth).
+CONFIG_XNU_NATIVE_PAN=y
 CONFIG_XNU_CRYPTO_BOOTSTRAP="prelinked"
+# Without this, check_for_panic_log() maps the BCM2837 header's PLATFORM_PANIC_LOG_PADDR
+# 0x3c0fc000, unmapped device space on SM8250, and PE_create_console() hangs the boot CPU.
+# Measured here 2026-10-30: a stage-4 reset before PE_create_console fired, after it did not.
+# With the flag, native-dt-panic-region.patch reads /pram from the ADT; there is none, so the
+# function returns without mapping anything (same as UniXNU-alioth).
+CONFIG_XNU_DT_PANIC_REGION=y
 # CONFIG_XNU_NATIVE_UFS is not set
-# CONFIG_XNU_NATIVE_ADRENO is not set
+# The A650 kernel GPU driver and its board probe (scripts/build-adreno650.py), as UniXNU-alioth.
+CONFIG_XNU_NATIVE_ADRENO=y
+CONFIG_XNU_NATIVE_ADRENO_ARCHIVE="{tree}/build/adreno740/libAdreno740.a"
+# On-screen boot stages, kernel log rows and panic text (UniXNU-alioth's package/BootProgress.c,
+# 520581af). The OS profile's zzz-boot-progress.patch calls into it under this switch, and
+# build-xnu-4k-baseline.sh builds and force-loads build/boot-progress/libBootProgress.a.
+# BootLog.c and BootReset.c inside it act only on sheng-log / sheng-autoreset, which this board
+# does not pass: nothing is written to UFS or IMEM.
+# build-xnu-4k-baseline.sh accepts it only together with NATIVE_UFS, OWNER_ROOT_AUDIT,
+# NATIVE_VIRTIO_BLOCK and SOURCE_CORECRYPTO14: it turns on with the storage components.
+CONFIG_XNU_BOOT_PROGRESS=y
+CONFIG_XNU_BUILD_ARCHIVES=y
+# BootProgressStubs.c and LinkStubs.c: zero definitions of the weak diagnostics BootProgress.c
+# references for components this board does not select yet.
+CONFIG_XNU_EXTRA_LD_ARCHIVES="{tree}/build/link-stubs/libLinkStubs.a"
+# AMFI's ConfigurationSettings panics "AMFI: No PMGR?" without an ApplePMGR provider (measured
+# here 2026-10-31, panic screen). ShengPlatformPower (UniXNU-alioth/sheng package, MIT) publishes the
+# original PMGR nub with every power operation refused: no clock, rail or reset is touched.
+# sheng-platform-power.patch calls sheng_pmgr_run() from bsd_init; sheng-pmgr=2 selects publication.
+CONFIG_XNU_SHENG_PMGR=y
+# Storage and owner root (same chain as UniXNU-alioth): ShengUfs publishes the SHNGROOT OS and
+# SystemOS windows of sda39, VerifiedRoot authenticates every root read against the signed
+# policies, and the owner path mounts SystemOS over / and boots launchd from it.
+CONFIG_XNU_NATIVE_UFS=y
+CONFIG_XNU_VERIFIED_ROOT_PROBE=y
+CONFIG_XNU_OWNER_ROOT_AUDIT=y
+CONFIG_XNU_OWNER_ROOT_TRUST=y
+CONFIG_XNU_NATIVE_VIRTIO_BLOCK=y
+CONFIG_XNU_VERIFIED_ROOT_ARCHIVE="{tree}/build/verified-root-os-xnu-bundle/libVerifiedRootProbe.a"
+CONFIG_XNU_NATIVE_VIRTIO_BLOCK_ARCHIVE="{tree}/build/virtio-mmio-block-verified-bundle/libVirtioMmioBlock.a"
+CONFIG_XNU_OWNER_CACHE_MOUNT=y
+CONFIG_XNU_OWNER_CACHE_STARTUP=y
+CONFIG_XNU_OWNER_BOOT_MANIFEST=y
+CONFIG_XNU_OWNER_UNION_SYSTEMOS=y
+# Data: not a RAM seed. patches/xnu/t970-ufs-data-mount.patch replaces the md0 branch with the
+# ShengUfs Data container lookup (volume 5915374F-7A58-4BD3-9C6F-0BD63348ACEA: rebuilt 2026-10-31 the
+# UniXNU way, the OS image's own private/var plus the skip-setup preferences, in
+# deploy/data-rebuild-20261031), so CONFIG_XNU_NATIVE_RAM_BLOCK stays off.
+CONFIG_XNU_OWNER_DATA_MOUNT=y
+# The Data volume lives on UFS (t970-ufs-data), so the payload carries no RAM seed (local check in scripts/unixnu/payload.py).
+CONFIG_XNU_STORAGE_DATA_VOLUME=y
+# The GOP framebuffer path (GopFramebuffer + package/LegacyDisplayProbe.cpp): bsd_init.c calls
+# native_legacy_display_late_probe() on this switch and build-xnu-4k-baseline.sh force-loads
+# build/native-legacy-display/libNativeLegacyDisplay.late.a. Same as UniXNU-alioth.
+CONFIG_XNU_NATIVE_LEGACY_DISPLAY=y
+
+# The QcomXnuUsbDebug CDC-ACM console (scripts/build-qcom-usb-debug.py, patches/xnu/t970-qcom-usb-debug-*.patch).
+CONFIG_XNU_QCOM_USB_DEBUG=y
