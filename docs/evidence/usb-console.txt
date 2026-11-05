@@ -1,0 +1,15 @@
+# periph14/15 USB CDC debug console excerpt (/dev/cu.usbmodem1101 on macOS), rows selected by prefix
+QCOM XNU USB CDC ACM v1
+QCOM XNU USB CDC ACM v1
+GPUCCLI backboardd opens 2 refused 0 closes 1 slot 0 peak 1353 last 0
+GPUCCLI mediaserverd opens 1 refused 0 closes 1 slot 255 peak 0 last 0
+GPUCCLI SpringBoard opens 2 refused 0 closes 1 slot 1 peak 609 last 0
+GPUCCLI WidgetRenderer_Defa opens 2 refused 0 closes 1 slot 2 peak 606 last 0
+GPUCCLI CollectionsPoster opens 2 refused 0 closes 1 slot 3 peak 512 last 0
+GPUCCLI Preferences opens 2 refused 0 closes 1 slot 4 peak 512 last 0
+GPUCCLI Spotlight opens 2 refused 0 closes 1 slot 4 peak 593 last 0
+GPUSWAP validate 1150 ok 1 reason 0 | copied 2 status 0 bytes 19622400 | retired 1150 gen 1150
+GPUFRAME ready 1 fail 0 copied 0 gpu offered 0 done 0 fail 0 abandon 0 | legacy surfaces 3 swaps 46387
+GPUFENCE calls 4503 timeouts 2120 waited 1445 gpu 1444 newest 1445 done 1444 observe 940 refused 0
+TOUCHSTAT t=165s frames=1671 valid=1689 contacts=0 irq=1 low=1671 hid=1671 xy=2101,1379 raw=000000000000 hstage=8 hload=0 hml=0 hmeta=0 hcls=208 hevdrv=264 hres=0 edge=1,27,2 loop=0 fail=0 tsplit=0
+TOUCHSTAT t=166s frames=1671 valid=1689 contacts=0 irq=1 low=1671 hid=1671 xy=2101,1379 raw=000000000000 hstage=8 hload=0 hml=0 hmeta=0 hcls=208 hevdrv=264 hres=0 edge=1,27,2 loop=0 fail=0 tsplit=0

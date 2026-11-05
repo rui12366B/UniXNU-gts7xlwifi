@@ -4,186 +4,211 @@ schema_version = 1
 name = "gts7xlwifi"
 soc = "SM8250"
 os_profile = "ipados-17.7.11-21H461"
-summary = "Samsung Galaxy Tab S7+ Wi-Fi (SM-T970). Format 2 configuration resolves; drivers move from the S7plus-iPadOS work per MIGRATION.md."
+summary = "Samsung Galaxy Tab S7+ Wi-Fi (SM-T970). iPadOS 17.7.11 desktop with 8 cores in 4+3+1 clusters and DVFS, native UFS root and Data, GPU-composited UI (Adreno 650), touch, brightness, USB debug console and battery; Wi-Fi at PCIe stage 4."
 
 [[area]]
 id = "configuration"
-status = "planned"
-components = ["ArmDTPlatform", "ArmCpu", "SoftwareAES", "XnuPrelink", "DarwinBoot"]
-paths = ["board.toml", "feeds.toml", "configs/**", ".gitmodules", ".github/**", ".gitignore"]
-inputs = ["Identify the configuration hardware, resources and existing component interfaces for this board."]
-configuration = ["Record the board.toml fields, DTS properties and defconfig values used for configuration."]
-procedure = ["Follow the configuration stage in the porting guide and record the actual commands."]
-findings = ["Collect the first configuration observation, its cause when established, and the resulting implementation decision."]
-completion = ["All source pins resolve; every selected component has a record; status shows the intended overrides and patch order."]
-limits = ["Hardware inputs and implementation are pending for this board."]
-next_action = ["Inventory the required configuration inputs before implementation."]
-evidence = []
+status = "implemented"
+components = ["ArmDTPlatform", "SoftwareAES", "XnuPrelink", "DarwinBoot"]
+paths = ["board.toml", "feeds.toml", "configs/**", ".gitmodules", ".github/**", ".gitignore", "local.toml.example", "unixnu.lock"]
+inputs = ["SM8250 layer FFT-infra/UniXNU-sm8250-common 166235ec; iPadOS 17.7.11 21H461 kernelcache as prelink donor."]
+configuration = ["board.toml [components] include, [kernel] patch_series (arch, soc, device before-os, os, device), [payload] text_fixups and ADT product strings."]
+procedure = ["./unixnu build kernel; ./unixnu build payload --trust-cache <owner trust cache>."]
+findings = ["A payload built without --trust-cache lacks the ADT trust-cache slot and the boot menu reports Compromised Data."]
+completion = ["All source pins resolve and the kernel, prelink and payload build."]
+limits = ["Built against a UniXNU-next checkout with docs/host-patches applied."]
+next_action = ["Drop the host patches once equivalent changes land upstream."]
+evidence = [
+  {kind = "source", reference = "board.toml", result = "Board configuration with component selection, patch order and payload ADT strings."},
+]
 
 [[area]]
 id = "firmware"
-status = "planned"
+status = "implemented"
 components = []
-paths = ["proprietary-files.txt", "scripts/extract-files.py", "scripts/gen-touch-firmware.py"]
-inputs = ["Identify the firmware and boot hardware, resources and existing component interfaces for this board."]
-configuration = ["Record the board.toml fields, DTS properties and defconfig values used for firmware and boot."]
-procedure = ["Follow the firmware and boot stage in the porting guide and record the actual commands."]
-findings = ["Collect the first firmware and boot observation, its cause when established, and the resulting implementation decision."]
-completion = ["Firmware image builds, enters UniXNU, publishes the framebuffer and preserves the documented memory reservations."]
-limits = ["Hardware inputs and implementation are pending for this board."]
-next_action = ["Inventory the required firmware and boot inputs before implementation."]
-evidence = []
+paths = ["proprietary-files.txt", "scripts/gen-gpu-firmware-a650.py", "docs/menu/**"]
+inputs = ["Samsung bootloader T970 with a UEFI boot selector on the boot partition (separate firmware tree), ESP with EFI/UniXNU."]
+configuration = ["docs/menu/unixnu.toml: kernel command line <= 1000 bytes; payload at Payloads/gts7xlwifi."]
+procedure = ["Copy kernel.macho, kernel.macho.adt and the trust cache to the ESP; choose the UniXNU entry in the menu (the selector defaults to TWRP after adb reboot)."]
+findings = ["The A650 GMU/SQE/ZAP images are compiled in; scripts/gen-gpu-firmware-a650.py rebuilds the source from the tablet files, reassembling the ZAP ELF from its .b0N segments."]
+completion = ["The menu starts XNU with the payload and its ADT."]
+limits = ["The UEFI firmware itself is not in this repository."]
+next_action = ["Publish the UEFI firmware tree or pin it."]
+evidence = [
+  {kind = "source", reference = "proprietary-files.txt", result = "Firmware inputs with sources and SHA-256."},
+]
 
 [[area]]
 id = "cpu"
-status = "planned"
-components = []
-paths = ["package/CpuFreq*", "scripts/*armcpu*"]
-inputs = ["Identify the cpu and interrupts hardware, resources and existing component interfaces for this board."]
-configuration = ["Record the board.toml fields, DTS properties and defconfig values used for cpu and interrupts."]
-procedure = ["Follow the cpu and interrupts stage in the porting guide and record the actual commands."]
-findings = ["Collect the first cpu and interrupts observation, its cause when established, and the resulting implementation decision."]
-completion = ["Every enabled CPU reaches its entry checkpoint and timer/IPI handling works on each enabled CPU."]
-limits = ["Hardware inputs and implementation are pending for this board."]
-next_action = ["Inventory the required cpu and interrupts inputs before implementation."]
-evidence = []
+status = "device-verified"
+components = ["ArmCpu"]
+paths = ["package/CpuFreq*", "drivers/ArmCpu/**", "patches/xnu/t970-three-clusters.patch", "dts/**"]
+inputs = ["Kryo 585: 4x A55 (EPSS domain 0x18591000), 3x A77 (0x18592000), 1x A77 prime (0x18593000); GICv3; TSENS 0xc263000/0xc265000."]
+configuration = ["armcpu-spi-ipi=1 armcpu-spi-ipi-base=544; DTS unixnu,cluster-type and unixnu,die-cluster-id 0/1/2; sheng-cpufreq=4 sheng-cpufreq-cap=2000."]
+procedure = ["Boot with all 8 cores; read SMP and CPUFREQ rows of the boot log."]
+findings = ["SGI/SPI 1008..1015 are group-0 secure on this firmware, so IPIs use software-pended SPIs from 544. MPIDR AFF1 numbers single cores in one DynamIQ cluster, so the scheduling cluster comes from die-cluster-id (t970-three-clusters.patch, with the SM-T733 boot-cluster fallback). DVFS: perfcontrol class and 200 ms load per EPSS domain, 10 ms worker (after SM-T733 T733CpuPower)."]
+completion = ["Seven secondary cores reach step 7; each EPSS domain changes level with load."]
+limits = ["TSENS uses the hottest sensor only; no per-cluster thermal zones."]
+next_action = ["Group TSENS sensors per cluster as SM-T733 T733Thermal."]
+evidence = [
+  {kind = "device", reference = "docs/evidence/periph15-bootlog.txt", result = "SMP c1..c7=step7; CPUFREQ d0 1804 MHz, d1 1958 MHz, d2 844 MHz idle with 601 level changes.", command = "TWRP: python3 tools/read-boot-log.py --port <adb serial> --out logs (after booting the periph15 payload, docs/menu/unixnu.toml)", revision = "781e3528e2d5e0dc0c9c6fa1e409f5a4bc1cf0e2"},
+]
 
 [[area]]
 id = "memory"
-status = "planned"
+status = "device-verified"
 components = []
-paths = ["dts/**", "package/*Smmu*", "package/*Memory*", "scripts/*smmu*", "scripts/*memory*"]
-inputs = ["Identify the memory and dma hardware, resources and existing component interfaces for this board."]
-configuration = ["Record the board.toml fields, DTS properties and defconfig values used for memory and dma."]
-procedure = ["Follow the memory and dma stage in the porting guide and record the actual commands."]
-findings = ["Collect the first memory and dma observation, its cause when established, and the resulting implementation decision."]
-completion = ["All handoff regions are accounted for and each enabled DMA engine accesses its allocated range with the documented cache policy."]
-limits = ["Hardware inputs and implementation are pending for this board."]
-next_action = ["Inventory the required memory and dma inputs before implementation."]
-evidence = []
+paths = ["dts/**", "patches/xnu/t970-dram-extend.patch", "patches/xnu/t970-dram-holes.patch"]
+inputs = ["DRAM above the 2 GiB owned window up to t970-dram-end, with firmware holes."]
+configuration = ["t970-dram-end=0x280000000; /chosen/t970-dram-holes."]
+procedure = ["Boot and read the MEM row."]
+findings = ["XNU manages DRAM beyond the first window once the holes are skipped."]
+completion = ["totalMiB reflects the extended range."]
+limits = ["DMA engines use their own SMMU contexts per driver."]
+next_action = ["Raise t970-dram-end further per the RAM plan."]
+evidence = [
+  {kind = "device", reference = "docs/evidence/periph15-bootlog.txt", result = "MEM totalMiB=5969.", command = "TWRP: python3 tools/read-boot-log.py --port <adb serial> --out logs (after booting the periph15 payload, docs/menu/unixnu.toml)", revision = "781e3528e2d5e0dc0c9c6fa1e409f5a4bc1cf0e2"},
+]
 
 [[area]]
 id = "storage"
-status = "planned"
-components = []
-paths = ["drivers/ShengUfs", "scripts/*ufs*", "scripts/*storage*", "scripts/*userdata*", "scripts/*root*"]
-inputs = ["Identify the storage and root hardware, resources and existing component interfaces for this board."]
-configuration = ["Record the board.toml fields, DTS properties and defconfig values used for storage and root."]
-procedure = ["Follow the storage and root stage in the porting guide and record the actual commands."]
-findings = ["Collect the first storage and root observation, its cause when established, and the resulting implementation decision."]
-completion = ["Host: register, clock, link and SMMU facts match the board inventory.", "Reads: SCSI capacity, GPT and known blocks are correct; OS/SystemOS windows stay within userdata.", "Root: the configured volume mounts and launchd starts. Persistence: writes survive reboot within the allocated Data region."]
-limits = ["Hardware inputs and implementation are pending for this board."]
-next_action = ["Inventory the required storage and root inputs before implementation."]
-evidence = []
+status = "device-verified"
+components = ["ShengUfs", "VirtioMmioBlock", "VerifiedRoot", "AppleKeyStoreState"]
+paths = ["drivers/ShengUfs/**", "patches/xnu/t970-ufs-data-mount.patch", "patches/xnu/t970-migrate-once.patch", "patches/xnu/t970-mgcache-once.patch", "scripts/build-storage-bindings.py", "scripts/build-root-policy-archive.py", "scripts/data/original-storage-bindings.S"]
+inputs = ["UFS host (NativeUfs-alioth ab54059); signed OS image and Data container on a spare partition."]
+configuration = ["native-ufs-root=1 native-ufs-stream=0xe0 t970-ufs-data=1 ufsrw=1."]
+procedure = ["Boot and read the UFS row."]
+findings = ["Root reads are verified per 4 KiB block; Data persists across boots."]
+completion = ["No UFS failures or integrity errors over a full desktop session."]
+limits = ["Shutdown hangs unmounting the OS volume after IOServicePH::systemHalt; the UFS driver stops serving I/O there."]
+next_action = ["Serve I/O until the halt callback and flush, as SM-T733 native_ufs_shutdown_complete."]
+evidence = [
+  {kind = "device", reference = "docs/evidence/periph15-bootlog.txt", result = "UFS requests=321101 verified4K=1136628 failures=0 integrity=0.", command = "TWRP: python3 tools/read-boot-log.py --port <adb serial> --out logs (after booting the periph15 payload, docs/menu/unixnu.toml)", revision = "781e3528e2d5e0dc0c9c6fa1e409f5a4bc1cf0e2"},
+]
 
 [[area]]
 id = "display"
-status = "planned"
-components = []
-paths = ["package/*Display*", "package/*Framebuffer*", "package/*Backlight*", "package/AppleARMBacklight.cpp", "package/GeniI2c*", "scripts/*display*", "scripts/*gop*", "scripts/*framebuffer*"]
-inputs = ["Identify the display hardware, resources and existing component interfaces for this board."]
-configuration = ["Record the board.toml fields, DTS properties and defconfig values used for display."]
-procedure = ["Follow the display stage in the porting guide and record the actual commands."]
-findings = ["Collect the first display observation, its cause when established, and the resulting implementation decision."]
-completion = ["A known frame appears with correct geometry and colors, then userland presentation and backlight controls work."]
-limits = ["Hardware inputs and implementation are pending for this board."]
-next_action = ["Inventory the required display inputs before implementation."]
-evidence = []
+status = "device-verified"
+components = ["GopFramebuffer"]
+paths = ["drivers/GopFramebuffer/**", "package/LegacyDisplayProbe.cpp", "package/Backlight*", "patches/xnu/t970-text-repage.patch", "patches/xnu/t970-ui-trace.patch"]
+inputs = ["S6TUUM3 dual-DSI 2800x1752 panel, UEFI GOP framebuffer at 0x9c000000, DPU direct scanout."]
+configuration = ["sheng-dpu-scanout=2; ADT artwork-display-gamut = sRGB; 12 text_fixups (SM-T733 21H461 sRGB/BGRA8 policy)."]
+procedure = ["Boot to the desktop; read DISPLAY and SWAP rows."]
+findings = ["CoreAnimation XR10/b3a8 composition striped on A650 although every single format-550 operation probed exact; forcing sRGB BGRA8 (text_fixups + gamut) removed the stripes. text repage keeps the fixups after a code page is evicted."]
+completion = ["Desktop without stripes; swaps retire by direct scanout."]
+limits = ["120 Hz and brightness curve are not tuned."]
+next_action = ["Measure frame pacing with the GPU frame trace."]
+evidence = [
+  {kind = "device", reference = "docs/evidence/periph15-bootlog.txt", result = "DISPLAY stage=10; SWAP retired=1438 with 2 copies; [text fixup] applied=12.", command = "TWRP: python3 tools/read-boot-log.py --port <adb serial> --out logs (after booting the periph15 payload, docs/menu/unixnu.toml)", revision = "781e3528e2d5e0dc0c9c6fa1e409f5a4bc1cf0e2"},
+]
 
 [[area]]
 id = "input"
-status = "planned"
-components = []
-paths = ["drivers/ShengHidInput", "drivers/ShengNovatekTouch", "package/*Touch*", "package/*Button*", "scripts/*touch*", "scripts/*hid*"]
-inputs = ["Identify the input hardware, resources and existing component interfaces for this board."]
-configuration = ["Record the board.toml fields, DTS properties and defconfig values used for input."]
-procedure = ["Follow the input stage in the porting guide and record the actual commands."]
-findings = ["Collect the first input observation, its cause when established, and the resulting implementation decision."]
-completion = ["Touches map to the display, simultaneous contacts keep stable IDs, release events arrive, and buttons produce expected HID reports."]
-limits = ["Hardware inputs and implementation are pending for this board."]
-next_action = ["Inventory the required input inputs before implementation."]
-evidence = []
+status = "device-verified"
+components = ["ShengHidInput", "ShengNovatekTouch", "QcomGeniSpi"]
+paths = ["drivers/ShengHidInput/**", "package/T970FtsTouch.cpp", "package/HidInputProbe.cpp", "package/Button*"]
+inputs = ["STM fts1ba90a at I2C 0x49 on QUP SE5 pins 12/13, attention GPIO 15; PMIC keys."]
+configuration = ["native-touch=1 sheng-touch-hid=1 t970-touch-xform=5 offline-hid-input=1."]
+procedure = ["Touch the desktop; read TOUCHSTAT on the USB console."]
+findings = ["The panel bus is driven as a GPIO I2C master; ShengNovatekTouch and QcomGeniSpi come in as catalog dependencies of ShengHidInput and are not used by this board."]
+completion = ["Touches reach SpringBoard as HID events."]
+limits = ["No palm rejection or S Pen."]
+next_action = ["Add the S Pen digitizer."]
+evidence = [
+  {kind = "device", reference = "docs/evidence/usb-console.txt", result = "TOUCHSTAT frames and HID submissions on the live console.", command = "macOS: read /dev/cu.usbmodem* while the periph15 payload runs", revision = "781e3528e2d5e0dc0c9c6fa1e409f5a4bc1cf0e2"},
+]
 
 [[area]]
 id = "gpu"
-status = "planned"
+status = "device-verified"
 components = []
-paths = ["package/*Gpu*", "package/*Gmu*", "package/*Adreno*", "scripts/*adreno*", "scripts/*gpu*", "scripts/*metal*", "scripts/*turnip*", "scripts/*air*"]
-inputs = ["Identify the gpu hardware, resources and existing component interfaces for this board."]
-configuration = ["Record the board.toml fields, DTS properties and defconfig values used for gpu."]
-procedure = ["Follow the gpu stage in the porting guide and record the actual commands."]
-findings = ["Collect the first gpu observation, its cause when established, and the resulting implementation decision."]
-completion = ["GPU submissions complete, mapping/fence handling is correct, a known image renders, and the selected Metal client presents it."]
-limits = ["Hardware inputs and implementation are pending for this board."]
-next_action = ["Inventory the required gpu inputs before implementation."]
-evidence = []
+paths = ["drivers/Adreno650/**", "kits/**", "package/Gpu*", "package/T970GpuAddon.S", "scripts/build-adreno650.py", "scripts/t970-addon-add.py", "scripts/data/xr10-probe/**", "patches/xnu/t970-gpu-addon-embedded.patch", "patches/xnu/t970-sandbox-grant-entitlement.patch", "docs/host-patches/**"]
+inputs = ["Adreno 650 (A650 GMU/SQE/ZAP), apps SMMU GPU context; AdrenoMetal userspace (metal2vulkan + Turnip) in an embedded addon."]
+configuration = ["pipa-gpu=12 sheng-gpu-addon=1 sheng-fb-gpu=1; NativeSandboxGrantEntitlement = opengl-or-metal, posterkit.provider."]
+procedure = ["Boot to the desktop; read the gpu clients and methods rows."]
+findings = ["Wallpaper posters crash-looped on a nil MTLBuffer because MACF denied AGXDeviceUserClient; granting by entitlement (SM-T733) fixed them. A GPU read at 0x1_086de2c0 past the 32-bit window poisoned a VM once (diagnostics [gpu far]/[gpu vmfail] armed)."]
+completion = ["backboardd, SpringBoard, widget renderers, posters and Settings composite on the GPU with no map failures."]
+limits = ["mediaserverd gets VK_ERROR_INITIALIZATION_FAILED; a latched cb0 FSR 0x400 is not cleared."]
+next_action = ["Add an SMMU context fault handler that records and clears FSR."]
+evidence = [
+  {kind = "device", reference = "docs/evidence/periph15-bootlog.txt", result = "gpu clients backboardd 1353M, SpringBoard 609M, CollectionsPoster 512M; BoAlloc/BoMap/Submit 0 failures.", command = "TWRP: python3 tools/read-boot-log.py --port <adb serial> --out logs (after booting the periph15 payload, docs/menu/unixnu.toml)", revision = "781e3528e2d5e0dc0c9c6fa1e409f5a4bc1cf0e2"},
+]
 
 [[area]]
 id = "network"
-status = "planned"
+status = "implemented"
 components = []
-paths = ["drivers/Ath12kWifi", "package/*Wifi*", "package/MhiBoot*", "scripts/*wifi*", "scripts/*mhi*"]
-inputs = ["Identify the network hardware, resources and existing component interfaces for this board."]
-configuration = ["Record the board.toml fields, DTS properties and defconfig values used for network."]
-procedure = ["Follow the network stage in the porting guide and record the actual commands."]
-findings = ["Collect the first network observation, its cause when established, and the resulting implementation decision."]
-completion = ["Scanning, association, address configuration and sustained receive/transmit traffic pass with the selected firmware."]
-limits = ["Hardware inputs and implementation are pending for this board."]
-next_action = ["Inventory the required network inputs before implementation."]
-evidence = []
+paths = ["package/T970WifiProbe.cpp", "package/MhiBoot.*", "package/T970Rpmh.inc"]
+inputs = ["QCA6390 (17cb:1101) on PCIe0: PERST GPIO 79, CLKREQ 80, WLAN_EN 90; rails smpa4/5/6, smpc8, ldoc5; stream 0x1c01."]
+configuration = ["t970-wifi=<stage> (4 = link and endpoint, 5 = BHI firmware)."]
+procedure = ["Boot with t970-wifi=4 and read the [t970 wifi] rows."]
+findings = ["cmd-db lists several VRM names twice; the first match is used (Linux behaviour). Stage 5 with an SMMU bypass and a 36-bit buffer reset the tablet within 20 s."]
+completion = ["Link L0, endpoint identity, BAR and MHI registers readable."]
+limits = ["No DMA, MHI, QMI or ath11k yet."]
+next_action = ["Give stream 0x1c01 its own SMMU context with 32-bit IOVAs from 0xa0000000 (Chengdong-Yu/pong-wifi), then port its ath11k for QCA6390."]
+evidence = [
+  {kind = "device", reference = "docs/evidence/periph15-bootlog.txt", result = "[t970 wifi] link in 13 ms, endpoint 17cb:1101 class 0x0280, BAR0 at 0x60300000.", command = "TWRP: python3 tools/read-boot-log.py --port <adb serial> --out logs (after booting the periph15 payload, docs/menu/unixnu.toml)", revision = "781e3528e2d5e0dc0c9c6fa1e409f5a4bc1cf0e2"},
+]
 
 [[area]]
 id = "audio"
 status = "planned"
 components = []
-paths = ["package/*Adsp*", "package/*Audio*", "package/*Gpr*", "package/QcomGlink*", "package/QcomMdt*", "package/QcomSmem*", "package/QcomSmp2p*", "scripts/*adsp*", "scripts/*audio*", "scripts/*gpr*"]
-inputs = ["Identify the audio hardware, resources and existing component interfaces for this board."]
-configuration = ["Record the board.toml fields, DTS properties and defconfig values used for audio."]
-procedure = ["Follow the audio stage in the porting guide and record the actual commands."]
-findings = ["Collect the first audio observation, its cause when established, and the resulting implementation decision."]
-completion = ["Each declared route carries the selected audio format through playback or capture and handles start/stop correctly."]
-limits = ["Hardware inputs and implementation are pending for this board."]
-next_action = ["Inventory the required audio inputs before implementation."]
+paths = ["package/AdspFirmware.c"]
+inputs = ["ADSP and the four speaker amplifiers."]
+configuration = ["None yet."]
+procedure = ["Bring up the ADSP first."]
+findings = ["Not started."]
+completion = ["Native IOAudio2 output plays."]
+limits = ["No audio driver."]
+next_action = ["Port the ADSP loader and amplifier drivers."]
 evidence = []
 
 [[area]]
 id = "power"
-status = "planned"
+status = "implemented"
 components = []
-paths = ["package/*Battery*", "package/*Battmgr*", "package/*Power*", "package/*PlatformPower*", "package/QcomQmp*", "package/QcomRpmh*", "package/QcomScm.h", "scripts/*power*", "scripts/*battery*", "scripts/*pmgr*"]
-inputs = ["Identify the power hardware, resources and existing component interfaces for this board."]
-configuration = ["Record the board.toml fields, DTS properties and defconfig values used for power."]
-procedure = ["Follow the power stage in the porting guide and record the actual commands."]
-findings = ["Collect the first power observation, its cause when established, and the resulting implementation decision."]
-completion = ["Declared power controls and battery readings match observations; each claimed sleep/resume transition restores its dependent peripherals."]
-limits = ["Hardware inputs and implementation are pending for this board."]
-next_action = ["Inventory the required power inputs before implementation."]
-evidence = []
+paths = ["package/T970Battery.cpp", "package/ShengPlatformPower.cpp", "scripts/build-platform-power.py"]
+inputs = ["MAX77705 fuel gauge (I2C 0x36) and charger (0x69) on QUP SE0 pins 28/29; PSCI."]
+configuration = ["t970-battery=1 sheng-pmgr=2."]
+procedure = ["Boot and read the [t970 battery] row; shut down from Settings."]
+findings = ["Samsung arms the MAX77705 charger watchdog; unkicked it turns charging off (CHG_DTLS 0xb). The service kicks CHG_CNFG_06 every 10 s."]
+completion = ["iPadOS shows the battery level and charge state; halt powers off."]
+limits = ["Input current stays at the default USB limit; shutdown does not reach PSCI yet (storage)."]
+next_action = ["Set CHGIN_ILIM from the Type-C current; finish the UFS shutdown path."]
+evidence = [
+  {kind = "device", reference = "docs/evidence/periph15-bootlog.txt", result = "[t970 battery] 100.0 %, 4306 mV, +66 mA, charging, 48 watchdog kicks.", command = "TWRP: python3 tools/read-boot-log.py --port <adb serial> --out logs (after booting the periph15 payload, docs/menu/unixnu.toml)", revision = "781e3528e2d5e0dc0c9c6fa1e409f5a4bc1cf0e2"},
+]
 
 [[area]]
 id = "packaging"
-status = "planned"
+status = "implemented"
 components = []
-paths = ["scripts/*payload*", "scripts/*image*", "scripts/*flash*", "patches/**", "package/Kit.toml"]
-inputs = ["Identify the image assembly hardware, resources and existing component interfaces for this board."]
-configuration = ["Record the board.toml fields, DTS properties and defconfig values used for image assembly."]
-procedure = ["Follow the image assembly stage in the porting guide and record the actual commands."]
-findings = ["Collect the first image assembly observation, its cause when established, and the resulting implementation decision."]
-completion = ["Kernel and prelink succeed, payload contains all declared inputs, and the boot image matches the bootloader format and size limit."]
-limits = ["Hardware inputs and implementation are pending for this board."]
-next_action = ["Inventory the required image assembly inputs before implementation."]
-evidence = []
+paths = ["scripts/*payload*", "scripts/*image*", "scripts/build-*.py", "scripts/build-*.sh", "patches/**", "package/Kit.toml", "package/LinkStubs.c", "package/KeyStoreProbe.cpp"]
+inputs = ["iPadOS 17.7.11 21H461 kernelcache for prelink."]
+configuration = ["patches/xnu/series order."]
+procedure = ["./unixnu build kernel && ./unixnu build payload --trust-cache <file>"]
+findings = ["The AdrenoMetal submodule is reset to the superproject pin on every kernel build, so local changes must be committed and pinned."]
+completion = ["Kernel, prelink and payload build."]
+limits = ["Host patches in docs/host-patches are required."]
+next_action = ["Upstream the host patches."]
+evidence = [
+  {kind = "source", reference = "patches/xnu/series", result = "Board patch order."},
+]
 
 [[area]]
 id = "diagnostics"
-status = "planned"
+status = "device-verified"
 components = []
-paths = ["scripts/check-*", "scripts/probe-*", "scripts/audit-*", "scripts/read-*", "scripts/prepare-*", "scripts/data/**", "package/tests/**", "package/*Tests*", "package/*Diagnostic*", "package/*Probe*", "package/Boot*", "package/linux-log/**", "unixnu.lock"]
-inputs = ["Identify the diagnostics hardware, resources and existing component interfaces for this board."]
-configuration = ["Record the board.toml fields, DTS properties and defconfig values used for diagnostics."]
-procedure = ["Follow the diagnostics stage in the porting guide and record the actual commands."]
-findings = ["Collect the first diagnostics observation, its cause when established, and the resulting implementation decision."]
-completion = ["Each claimed milestone has a reproducible command, a matching source/image revision and an accessible result."]
-limits = ["Hardware inputs and implementation are pending for this board."]
-next_action = ["Inventory the required diagnostics inputs before implementation."]
-evidence = []
+paths = ["scripts/check-*", "scripts/probe-*", "scripts/audit-*", "scripts/read-*", "scripts/prepare-*", "scripts/data/**", "package/Boot*", "package/*Probe*", "tools/**", "docs/evidence/**", "drivers/QcomXnuUsbDebug/**", "patches/xnu/t970-qcom-usb-debug-*.patch"]
+inputs = ["Boot log ring in a spare partition; DWC3 CDC-ACM debug console behind the MAX77705 MUIC switch."]
+configuration = ["qcom-usb-debug=1 qcom-usb-ctl=1 t970-qud-resume=1 t970-qud-retry=1; boot-progress=3."]
+procedure = ["tools/read-boot-log.py from TWRP; on macOS read /dev/cu.usbmodem*."]
+findings = ["The USB-C D+/D- reach the SoC only through the MAX77705 analog switch, which iPadOS found open (CONTROL1 0x3f); writing COM_USB (0x09) over the opcode mailbox brought up the console. The HS PHY needs QSCRATCH utmi-as-pipe and VBUS override."]
+completion = ["The Mac enumerates Qualcomm XNU Debug and streams the log from boot."]
+limits = ["No Apple USB device stack (Finder/usbmux)."]
+next_action = ["Port an IOUSBDeviceFamily DWC3 controller (UniXNU-alioth AliothUSBDevice)."]
+evidence = [
+  {kind = "device", reference = "docs/evidence/usb-console.txt", result = "QCOM XNU USB CDC ACM v1 and live rows on /dev/cu.usbmodem1101.", command = "macOS: read /dev/cu.usbmodem* while the periph15 payload runs", revision = "781e3528e2d5e0dc0c9c6fa1e409f5a4bc1cf0e2"},
+  {kind = "device", reference = "docs/evidence/periph15-bootlog.txt", result = "[t970 muic] CONTROL1 0x3f -> 0x09; QCOM USB ACTIVE (CDC-ACM up).", command = "TWRP: python3 tools/read-boot-log.py --port <adb serial> --out logs (after booting the periph15 payload, docs/menu/unixnu.toml)", revision = "781e3528e2d5e0dc0c9c6fa1e409f5a4bc1cf0e2"},
+]
