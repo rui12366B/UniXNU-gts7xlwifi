@@ -1,0 +1,28 @@
+# periph15 boot log excerpt (SM-T970, iPadOS 21H461, kernel.macho sha256 cae6444861712397e77e0c7f76f1e4eb0c314dd20eb62d984b8b0f3678a0c704)
+# read from TWRP with tools/read-boot-log.py; rows selected by prefix, unedited
+magic              SHLOG001
+version            4
+header_bytes       152
+window_blocks      8192
+msg_first          1
+msg_blocks         32
+time=467s idle=72s IRQ=6678638 monitor=468 lost=57599 root=1 procs=1 free=1186803
+UFS requests=321101 verified4K=1136628 failures=0 integrity=0 published=2
+DISPLAY stage=10 PM=2 calls=7 callbacks=1 guard=0 owned=1
+SWAP calls=1438 accepted=1 reason=0 COPY calls=2 status=00000000 bytes=19622400 retired=1438
+MEM totalMiB=5969 free4K=1186803 active=16796 inactive=16671 wired=134763 speculative=125
+SMP req=1 run=7 cond=1 boot=0 | c1=step7 c2=step7 c3=step7 c4=step7 c5=step7 c6=step7 c7=step7
+CPUFREQ t43C thr0 d0:16@1804 l100 q20 n3 d1:12@1958 l23 q100 n1 d2:0@844 l0 q0 n601
+QCOM USB ACTIVE (CDC-ACM up)
+UFS TIME verify=4466 ms read=47932 ms verified=1136628 blocks (4439 MiB) requests=321101
+[gpu methods] n:calls/fail/us 1:14/0/13 2:1543/0/193964 3:1659/0/503917 4:564/0/201433 5:1730/0/4313605
+[gpu methods+] 6:5194/2496/2672877 7:2/0/2 8:1748/0/791 13:1526/0/572 14:477/0/244 15:14/0/3
+[gpu clients] kernel_task 0/0/2 s- 512M r0 backboardd 2/0/2 s- 1353M r0 mediaserverd 1/0/1 s- 0M r0 SpringBoard 2/0/2 s- 609M r0 WidgetRenderer_Defa 2/0/2 s- 606M r0 CollectionsPoster 2/0/2 s- 512M r0 Preferences 2/0/2 s- 512M r0 Spotlight 2/0/2 s- 593M r0
+[t970 wifi] st 20 rails 1f gdsc f822f000 halt 3f pins 30003 pcs 600a6 rp 10b17cb ltssm 111/b0120008 dbg 3431711/8000010 13ms ep 110117cb cls 2800001
+[t970 wifi ep] bar fff00004/60300004 cmd 100006 mhi len 100 ver deadbeef cfg 800080 bhi 100 ctrl 0 status 0 | ee 0 st 0 err 0 sid 80000015
+[qud retry] step 5 rails 0 result 1 polls 72826 cpu 0 | dsts 83bb98 dctl 80f00000 devten 207
+[t970 muic] step 2 rev 1a52 status 270582 ctrl1 53f -> 509 nacks 0 cc 7108 int 0
+[qud] phase 3 error 0 core 0 qcom 0 restore 0 dma 16 hw 4020400a trace 5/21200000 polls 89262 ev 0 iofail 0 | diag 3 failed 0
+[t970 battery] st 2 soc 100.0% 4306mV 66mA 26.8C fl b full 8905mAh design 9385mAh cyc 86 n 461 fail 0 chg 5f31 kick 48
+[gpu tables] sw 0/231 vm 14/14/0/6 err 0 at 0 | ap 0/0 chk 10000000 mode 1 | pages 25/646/621/0 | close 2 p0
+[text fixup] parsed=12 applied=12
