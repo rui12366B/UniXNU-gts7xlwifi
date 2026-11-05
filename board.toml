@@ -7,7 +7,7 @@ name = "gts7xlwifi"
 soc = "SM8250"
 soc_source = "sm8250"
 os_profile = "ipados-17.7.11-21H461"
-description = "Samsung Galaxy Tab S7+ Wi-Fi (SM-T970, gts7xlwifi)"
+description = "Samsung Galaxy Tab S7+ Wi-Fi (SM-T970, gts7xlwifi): iPadOS desktop, 8 cores, GPU, touch, USB console, battery"
 kit = "gts7xlwifi"
 
 [components]
