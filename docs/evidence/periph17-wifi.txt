@@ -1,0 +1,7 @@
+# periph17 boot log excerpt (kernel.macho sha256 c667458053d993abdb2d34dcf34dee9551b780ba05fe3c501af15ef26347cc28), Wi-Fi stage 5 rows, unedited
+[t970 wifi] st 20 rails 1f gdsc f822f000 halt 3f pins 30003 pcs 600a6 rp 10b17cb ltssm 111/b0120008 dbg 3a19b11/8000010 13ms ep 110117cb cls 2800001
+[t970 wifi rails] smpa4 0 smpa6 0 smpa5 0 smpc8 0 ldoc5 0
+[t970 wifi ep] bar fff00004/60300004 cmd 100006 mhi len 100 ver deadbeef cfg 800080 bhi 100 ctrl 0 status 0 | ee 0 st 0 err 0 sid 80000015
+[t970 wifi smmu] scr0 2f0406 idr0 4c017e57 valid 7 | 1c01 smr#ffff 0 s2cr 0 | 1c00 smr#ffff 0 s2cr 0
+[t970 wifi dom] rc 1 cr0 2f0406 idr1 6000004a had 0 cb/smr/asid fc000706 tables 1:238fe000 fsr 400 -> 400 far 8616:da652291 fsynr 46010b | bank 6 at 86068
+[t970 wifi mhi] step 5 smr 607 fw 4389024 wait 0s pa a0000000 | boot 30609 ee 0 state 0 bhi ffffffff err ef0e0003 3000ms status 0 fwerr 0

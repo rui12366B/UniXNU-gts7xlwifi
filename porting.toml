@@ -142,11 +142,12 @@ paths = ["package/T970WifiProbe.cpp", "package/MhiBoot.*", "package/T970Rpmh.inc
 inputs = ["QCA6390 (17cb:1101) on PCIe0: PERST GPIO 79, CLKREQ 80, WLAN_EN 90; rails smpa4/5/6, smpc8, ldoc5; stream 0x1c01."]
 configuration = ["t970-wifi=<stage> (4 = link and endpoint, 5 = BHI firmware)."]
 procedure = ["Boot with t970-wifi=4 and read the [t970 wifi] rows."]
-findings = ["cmd-db lists several VRM names twice; the first match is used (Linux behaviour). Stage 5 with an SMMU bypass and a 36-bit buffer reset the tablet within 20 s."]
+findings = ["cmd-db lists several VRM names twice; the first match is used (Linux behaviour). Stage 5 with an SMMU bypass and a 36-bit buffer reset the tablet within 20 s.", "A private apps-SMMU stage-1 bank for stream 0x1c01 (IOVA 0xa0000000, 4 MiB page-mapped arena) contains the endpoint DMA: BHI fetched the SBL with FSR staying at FORMAT 0x400 and no reset. Choosing the bank top-down and writing FSR hung a CPU at the first access; bottom-up like QcomUsbDmaDomain with 32-bit accesses works. FSR 0x400 is the AArch64 FORMAT bit, not a fault."]
 completion = ["Link L0, endpoint identity, BAR and MHI registers readable."]
-limits = ["No DMA, MHI, QMI or ath11k yet."]
-next_action = ["Give stream 0x1c01 its own SMMU context with 32-bit IOVAs from 0xa0000000 (Chengdong-Yu/pong-wifi), then port its ath11k for QCA6390."]
+limits = ["DMA domain works; SBL does not reach READY yet; no MHI contexts, QMI or ath11k."]
+next_action = ["After BHI the device stays in PBL and never reports READY within 3 s: extend the wait to 10 s, trace EE/state/BHI status every 100 ms, compare with Linux mhi_fw_load_bhi; then MHI contexts, BHIe for the full image and the ath11k port (Chengdong-Yu/pong-wifi)."]
 evidence = [
+  {kind = "device", reference = "docs/evidence/periph17-wifi.txt", result = "[t970 wifi dom] rc 1 bank 6 SMR 7 ASID 0xfc00, FSR 0x400; [t970 wifi mhi] BHI from IOVA 0xa0000000, failed in WaitReady after 3000 ms.", command = "TWRP: python3 tools/read-boot-log.py --port <adb serial> (periph17 payload, t970-wifi=5)", revision = "cf6ed1702d3ddc2ace4cc988b982117e77f32c0b"},
   {kind = "device", reference = "docs/evidence/periph15-bootlog.txt", result = "[t970 wifi] link in 13 ms, endpoint 17cb:1101 class 0x0280, BAR0 at 0x60300000.", command = "TWRP: python3 tools/read-boot-log.py --port <adb serial> --out logs (after booting the periph15 payload, docs/menu/unixnu.toml)", revision = "781e3528e2d5e0dc0c9c6fa1e409f5a4bc1cf0e2"},
 ]
 
