@@ -208,6 +208,7 @@ extern volatile uint32_t t970_wifi_mhi[13] __attribute__((weak_import));
 extern volatile int32_t t970_qud_retry[8] __attribute__((weak_import));
 // T970WifiProbe.cpp MAX77705 MUIC USB switch: step, hw/fw rev, status1/2/bc, CONTROL1 before/after, nacks, cc status, uic int.
 extern volatile int32_t t970_muic[8] __attribute__((weak_import));
+extern volatile uint32_t t970_wifi_dom[14] __attribute__((weak_import));
 extern volatile uint32_t t970_qud_faults[16] __attribute__((weak_import));
 extern volatile int32_t t970_qud_phy[15] __attribute__((weak_import));
 extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
@@ -835,7 +836,7 @@ static size_t compose(char *out, size_t cap, uint32_t slot, unsigned now) {
   // gts7xlwifi Wi-Fi: stage, rails, GDSC, halt before/after, pins, PHY status, link, endpoint id, BAR/MHI and BHI.
   if (&t970_wifi_stats && t970_wifi_stats[0]) {
     const volatile uint32_t *w = t970_wifi_stats;
-    char row[200];
+    char row[260];
     snprintf(row, sizeof row, "[t970 wifi] st %d rails %x gdsc %x halt %x pins %x pcs %x rp %x ltssm %x/%x dbg %x/%x %ums ep %x cls %x", (int)w[0], w[5], w[2],
              w[3], w[4], w[6], w[7], w[10], w[11], w[8], w[9], w[12], w[13], w[14]);
     at = put(out, at, cap, row, sizeof row);
@@ -864,6 +865,13 @@ static size_t compose(char *out, size_t cap, uint32_t slot, unsigned now) {
     char row[180];
     snprintf(row, sizeof row, "[t970 wifi smmu] scr0 %x idr0 %x valid %u | 1c01 smr#%x %x s2cr %x | 1c00 smr#%x %x s2cr %x", m[0], m[1], m[2], m[3], m[4],
              m[5], m[6], m[7], m[8]);
+    at = put(out, at, cap, row, sizeof row);
+  }
+  if (&t970_wifi_dom && t970_wifi_dom[0]) {
+    const volatile uint32_t *w = t970_wifi_dom;
+    char row[260];
+    snprintf(row, sizeof row, "[t970 wifi dom] rc %d cr0 %x idr1 %x had %x cb/smr/asid %x tables %x:%08x fsr %x -> %x far %x:%08x fsynr %x | bank %u at %x",
+             (int)w[0], w[1], w[2], w[3], w[4], w[6], w[5], w[7], w[8], w[10], w[9], w[11], w[12], w[13]);
     at = put(out, at, cap, row, sizeof row);
   }
   if (&t970_wifi_mhi && t970_wifi_mhi[0]) {
