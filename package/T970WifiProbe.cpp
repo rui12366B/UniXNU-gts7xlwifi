@@ -51,6 +51,11 @@ volatile int32_t t970_qud_retry[8];
 // [5] MhiBoot phase | error << 8 | failed phase << 16, [6] EE, [7] MHI state, [8] BHI status, [9] BHI error code, [10] ms in the MHI loop,
 // [11] MHI status register, [12] firmware open/read error
 volatile uint32_t t970_wifi_mhi[13];
+// periph16 stage 5 DMA domain (wdom): [0] result (1 installed, negative: failed step), [1] SMMU CR0, [2] IDR1, [3] SMR already covering
+// 0x1c01 | 0x10000, [4] bank | SMR index << 8 | ASID << 16, [5..6] page-table PA, [7] bank FSR after install, [8] FSR after BHI,
+// [9..10] FAR, [11] FSYNR0. periph17: while install() runs [0] is 0x1000 + step and [12] the bank, [13] the register offset being
+// touched, so the boot log's compose() (which reads these live) shows where a stuck access stopped.
+volatile uint32_t t970_wifi_dom[14];
 // MAX77705 MUIC USB-2 switch (before the late USB retry; t970-muic=0 skips it): [0] step (1 bus answered, 2 switched to USB, 3 already USB,
 // negative: failed step), [1] UIC_HW_REV << 8 | UIC_FW_REV, [2] USBC_STATUS1 << 16 | USBC_STATUS2 << 8 | BC_STATUS, [3] CONTROL1 read
 // before (DATAIN0 << 8 | DATAIN1), [4] CONTROL1 read after, [5] NACKs, [6] CC_STATUS0 << 8 | CC_STATUS1, [7] UIC_INT before the reads
@@ -395,33 +400,148 @@ void smmuSurvey() {
 // physically contiguous buffer below 4 GiB and cleaned to memory. MhiBoot (UniXNU-sheng) starts it and is stepped until the device
 // reports READY (MhiNeedContexts), which proves the stream, the DMA and the image; the MHI contexts and the full image are the next stage.
 constexpr uint32_t kSblBytes = 0x80000;
+// ---- Wi-Fi DMA domain (periph16) -------------------------------------------------------------------------------------
+// periph9/10: an SMMU bypass for 0x1c00/0x1c01 and a buffer above 4 GiB reset the tablet ~20 s in at the first DMA. Now the
+// endpoint stream 0x1c01 gets a private AArch64 stage-1 context of the apps SMMU (0x15000000) with 32-bit IOVAs from 0xa0000000
+// (Chengdong-Yu/pong-wifi's choice; Android cnss uses 0xa0000000 + 256 MiB), as QcomXnuUsbDebug's QcomUsbDmaDomain does for the USB
+// stream, but over a 4 MiB arena of ordinary (not contiguous) pages. A DMA outside the arena faults in this bank (terminated, no
+// stall: SCTLR CFCFG 0) instead of reaching memory; t970_wifi_dom records it. Register values as QcomUsbDmaDomain.c: CBA2R VA64,
+// CBAR S1 translation / S2 bypass 0x1f300, TCR 0x803520 (T0SZ 32, WBWA inner-shareable walks, EPD1), SCTLR 0x27; MAIR attr 0 is
+// Normal non-cacheable (0x44) so the CPU side keeps explicit cache maintenance. The bank and ASID are taken from the top down,
+// QcomUsbDmaDomain takes them from the bottom up.
+namespace wdom {
+constexpr uint64_t kSmmu = 0x15000000, kSmmuBytes = 0x100000, kIova = 0xa0000000;
+constexpr uint32_t kStream = 0x1c01, kArenaBytes = 4u << 20, kL3Tables = kArenaBytes >> 21, kTablePages = 2 + kL3Tables;
+constexpr uint64_t kLeaf = 0x0060000000000f43ull;   // AF, inner shareable, nG, AP EL0 RW, UXN/PXN, page; AttrIndx 0
+Window gSmmu;
+IOBufferMemoryDescriptor *gTables, *gArena;
+uint8_t *gArenaVa;
+uint32_t gCb = 0xffff, gIndex = 0xffff, gAsid, gShift, gPages;
+uint64_t gCbBase;
+void at(uint64_t off) {t970_wifi_dom[13] = uint32_t(off); __asm__ volatile("dsb sy" ::: "memory");}
+void step(uint32_t n) {t970_wifi_dom[0] = 0x1000 + n; __asm__ volatile("dsb sy" ::: "memory");}
+uint32_t r32(uint64_t off) {at(off); return gSmmu.va[off / 4];}
+void w32(uint64_t off, uint32_t v) {at(off | 0x80000000u); gSmmu.va[off / 4] = v; __asm__ volatile("dsb sy" ::: "memory");}
+// 64-bit registers as two 32-bit accesses, low word first (as the USB lease's platform does for its table registers)
+void w64(uint64_t off, uint64_t v) {w32(off, uint32_t(v)); w32(off + 4, uint32_t(v >> 32));}
+uint64_t r64(uint64_t off) {const uint32_t lo = r32(off); return lo | uint64_t(r32(off + 4)) << 32;}
+uint64_t bank(uint32_t i) {return (uint64_t(gPages) + i) << gShift;}
+// Returns 0 or the failing step (negative).
+int install() {
+    volatile uint32_t *d = t970_wifi_dom;
+    step(1);
+    if (!mapWindow(gSmmu, kSmmu, kSmmuBytes)) return -1;
+    step(2);
+    const uint32_t cr0 = r32(0), id0 = r32(0x20), id1 = r32(0x24), id2 = r32(0x28);
+    d[1] = cr0; d[2] = id1;
+    if (cr0 & (1u << 3)) return -2;                       // extended stream IDs: not this SMMU's mode
+    const uint32_t streams = id0 & 0xff, banks = id1 & 0xff, ns2 = (id1 >> 16) & 0xff;
+    gShift = (id1 >> 31) ? 16 : 12; gPages = 2u << ((id1 >> 28) & 7);
+    if (!streams || streams > 128 || !banks || banks > 128 || bank(banks) > kSmmuBytes) return -3;
+    // the SMR slot: none may already cover the stream; take the first invalid one
+    step(3);
+    bool used[128] = {};
+    uint32_t freeSmr = 0xffff;
+    for (uint32_t i = 0; i < streams; ++i) {
+        const uint32_t smr = r32(0x800 + 4 * i), s2cr = r32(0xc00 + 4 * i);
+        if (!(smr & (1u << 31))) {if (freeSmr == 0xffff) freeSmr = i; continue;}
+        const uint32_t id = smr & 0x7fff, mask = (smr >> 16) & 0x7fff;
+        if (((s2cr >> 16) & 3) == 0 && (s2cr & 0xff) < banks) used[s2cr & 0xff] = true;
+        if (((kStream ^ id) & ~mask & 0x7fff) == 0) {d[3] = i | 0x10000; return -4;}
+    }
+    if (freeSmr == 0xffff) return -5;
+    // the bank: from the top, stage-1 capable (>= NUMS2CB), not routed to, translation off, no recorded fault
+    uint16_t asids[256] = {};
+    unsigned nAsid = 0;
+    step(4);
+    for (uint32_t i = 0; i < banks; ++i) {
+        d[12] = i;
+        const uint32_t cbar = r32((1ull << gShift) + 4 * i);
+        if (((cbar >> 16) & 3) == 0) continue;            // stage-2 bank: VMID, no ASID
+        if (nAsid + 2 <= 256) {asids[nAsid++] = uint16_t(r64(bank(i) + 0x20) >> 48); asids[nAsid++] = uint16_t(r64(bank(i) + 0x28) >> 48);}
+    }
+    // bottom up from NUMS2CB, as QcomUsbDmaDomain (proven on this SMMU); the USB lease at 25 s then skips this enabled bank
+    step(5);
+    for (uint32_t i = ns2; i < banks; ++i) {
+        d[12] = i;
+        if (used[i] || (r32(bank(i)) & 1) || (r32(bank(i) + 0x58) & 0xc00001feu)) continue;
+        gCb = i; break;
+    }
+    if (gCb == 0xffff) return -6;
+    for (uint32_t a = 0xfc00; a > 0xfa00 && !gAsid; --a) {
+        bool taken = false;
+        for (unsigned j = 0; j < nAsid; ++j) if (asids[j] == a) taken = true;
+        if (!taken) gAsid = a;
+    }
+    if (!gAsid) return -7;
+    gCbBase = bank(gCb);
+    d[12] = gCb;
+    d[4] = gCb | freeSmr << 8 | gAsid << 16;
+    step(6);
+    // memory: the tables contiguous (a few pages), the arena page by page
+    gTables = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task, kIODirectionInOut | kIOMemoryPhysicallyContiguous,
+                                                               kTablePages * 4096, 0x000000fffffff000ull);
+    gArena = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task, kIODirectionInOut, kArenaBytes, 4096);
+    if (!gTables || !gArena || gTables->prepare() != kIOReturnSuccess || gArena->prepare() != kIOReturnSuccess) return -8;
+    uint64_t *t = static_cast<uint64_t *>(gTables->getBytesNoCopy());
+    gArenaVa = static_cast<uint8_t *>(gArena->getBytesNoCopy());
+    const uint64_t tpa = t ? kvtophys(vm_offset_t(t)) : 0;
+    if (!t || !gArenaVa || !tpa) return -9;
+    for (uint32_t i = 1; i < kTablePages; ++i) if (kvtophys(vm_offset_t(t) + 4096 * i) != tpa + 4096 * i) return -10;
+    d[5] = uint32_t(tpa); d[6] = uint32_t(tpa >> 32);
+    memset(t, 0, kTablePages * 4096);
+    t[(kIova >> 30) & 3] = (tpa + 4096) | 3;                                   // L1 (T0SZ 32: four 1 GiB entries) -> L2
+    for (uint32_t k = 0; k < kL3Tables; ++k) t[512 + (((kIova >> 21) + k) & 511)] = (tpa + 8192 + 4096ull * k) | 3;   // L2 -> L3
+    for (uint32_t off = 0; off < kArenaBytes; off += 4096) {
+        const uint64_t pa = kvtophys(vm_offset_t(gArenaVa + off));
+        if (!pa || (pa & 4095)) return -11;
+        t[1024 + off / 4096] = (pa & 0x0000fffffffff000ull) | kLeaf;
+    }
+    flush_dcache64(tpa, kTablePages * 4096, TRUE);
+    step(7);
+    // the context bank, disabled while written
+    const uint32_t ps = id2 & 15;
+    w32((1ull << gShift) + 0x800 + 4 * gCb, 1);                               // CBA2R: VA64
+    w32((1ull << gShift) + 4 * gCb, 0x1f300);                                 // CBAR
+    w32(gCbBase + 0x10, (r32(gCbBase + 0x10) & ~0x38017u) | 0x38010u | ps);    // TCR2: SEP, 16-bit ASID, PASize
+    w32(gCbBase + 0x30, 0x803520);                                            // TCR
+    w64(gCbBase + 0x20, tpa | uint64_t(gAsid) << 48);                         // TTBR0
+    w64(gCbBase + 0x28, uint64_t(gAsid) << 48);                               // TTBR1
+    w32(gCbBase + 0x38, 0x44); w32(gCbBase + 0x3c, 0);                         // MAIR0/1: attr 0 Normal-NC
+    w32(gCbBase + 0x34, 0);                                                   // CONTEXTIDR
+    step(8);
+    w32(gCbBase + 0x610, gAsid);                                              // TLBIASID
+    w32(gCbBase + 0x7f0, 0xffffffffu);                                        // TLBSYNC
+    unsigned n = 0;
+    for (; n < 1000 && (r32(gCbBase + 0x7f4) & 1); ++n) IODelay(1);
+    if (n == 1000) return -12;
+    step(9);
+    w32(gCbBase, 0x27);                                                       // SCTLR: CFRE AFE TRE M
+    step(10);
+    w32(0xc00 + 4 * freeSmr, gCb);                                            // S2CR: translate via the bank
+    w32(0x800 + 4 * freeSmr, (1u << 31) | kStream);                           // SMR: valid, exact 0x1c01
+    gIndex = freeSmr;
+    d[7] = r32(gCbBase + 0x58);
+    return 0;
+}
+// Fault picture of the bank: FSR, FAR, FSYNR0 into t970_wifi_dom[8..11].
+void sample() {
+    if (!gSmmu.va || gCb == 0xffff) return;
+    volatile uint32_t *d = t970_wifi_dom;
+    d[8] = r32(gCbBase + 0x58);
+    const uint64_t far = r64(gCbBase + 0x60);
+    d[9] = uint32_t(far); d[10] = uint32_t(far >> 32); d[11] = r32(gCbBase + 0x68);
+}
+}  // namespace wdom
+
 void wifiStage5() {
     volatile uint32_t *mh = t970_wifi_mhi;
-    // 1: SMMU bypass for the PCIe streams
+    // 1: the stream's own SMMU context and its 4 MiB arena at IOVA 0xa0000000
     {
-        Window w = {};
-        if (!mapWindow(w, 0x15000000, 0x1000)) {mh[0] = uint32_t(-1); return;}
-        volatile uint32_t *r = w.va;
-        const unsigned n = r[0x20 / 4] & 0xff;
-        unsigned freeIndex = 0xffff, matched = 0xffff;
-        for (unsigned i = 0; i < n && i < 128; ++i) {
-            const uint32_t smr = r[(0x800 + 4 * i) / 4];
-            if (smr & (1u << 31)) {
-                const uint32_t id = smr & 0x7fff, mask = (smr >> 16) & 0x7fff;
-                if (((0x1c01 ^ id) & ~mask & 0x7fff) == 0) matched = i;
-            } else if (freeIndex == 0xffff) {
-                freeIndex = i;   // the first entry not in use
-            }
-        }
-        if (matched != 0xffff) mh[1] = matched | 0x10000;
-        else if (freeIndex != 0xffff) {
-            r[(0xc00 + 4 * freeIndex) / 4] = 1u << 16;                                  // S2CR: bypass
-            __asm__ volatile("dsb sy" ::: "memory");
-            r[(0x800 + 4 * freeIndex) / 4] = 1u << 31 | 1u << 16 | 0x1c00;              // SMR: valid, mask 1, 0x1c00/0x1c01
-            __asm__ volatile("dsb sy" ::: "memory");
-            mh[1] = freeIndex;
-        } else {mh[0] = uint32_t(-1); release(w); return;}
-        release(w);
+        const int rc = wdom::install();
+        t970_wifi_dom[0] = uint32_t(rc ? rc : 1);
+        if (rc) {mh[0] = uint32_t(-1); return;}
+        mh[1] = wdom::gIndex | wdom::gCb << 8;
     }
     mh[0] = 1;
     // 2: the boot loader from Data (the GPU addon writes /private/var/ngpu/firmware/qca6390 before its mount; wait up to 90 s)
@@ -437,36 +557,26 @@ void wifiStage5() {
     }
     if (err || fwSize < kSblBytes) {mh[12] = uint32_t(err); mh[0] = uint32_t(-2); if (!err) sheng_fw_close(fw); return;}
     mh[2] = uint32_t(fwSize);
-    // 3: a physically contiguous buffer below 4 GiB. periph5/6: getPhysicalSegment answered 0; periph7: IOMallocContiguous(512 KiB) NULL.
-    // Now a contiguous IOBufferMemoryDescriptor whose pages are looked up one by one with kvtophys, which must run on without a gap.
-    // Codes: -31 allocation, -32 address 0, -33 above 4 GiB, -34 not contiguous (mh[4] then the page where the run broke).
-    IOBufferMemoryDescriptor *buf = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task, kIODirectionInOut | kIOMemoryPhysicallyContiguous,
-                                                                                    kSblBytes, 0x0000000ffffff000ULL);
-    if (!buf) {sheng_fw_close(fw); mh[0] = uint32_t(-31); return;}
-    (void)buf->prepare();
-    uint8_t *va = static_cast<uint8_t *>(buf->getBytesNoCopy());
-    const uint64_t pa = va ? kvtophys(vm_offset_t(va)) : 0;
-    mh[4] = uint32_t(pa);
-    if (!pa) {sheng_fw_close(fw); buf->release(); mh[0] = uint32_t(-32); return;}
-    // BHI takes a 64-bit address (IMGADDR_HIGH): no 4 GiB limit (periph7/8: a contiguous 512 KiB below 4 GiB was not available).
-    mh[11] = uint32_t(pa >> 32);
-    for (uint32_t off = 4096; off < kSblBytes; off += 4096)
-        if (kvtophys(vm_offset_t(va + off)) != pa + off) {mh[4] = off; sheng_fw_close(fw); buf->release(); mh[0] = uint32_t(-34); return;}
+    // 3: the boot loader at the start of the arena; the device sees it at IOVA 0xa0000000. The CPU copy is cleaned to memory
+    // (the device side is non-cacheable).
+    uint8_t *va = wdom::gArenaVa;
+    const uint64_t iova = wdom::kIova;
+    mh[4] = uint32_t(iova);
     err = sheng_fw_read(fw, 0, va, kSblBytes);
     sheng_fw_close(fw);
-    if (err) {mh[12] = uint32_t(err) | 0x10000; buf->release(); mh[0] = uint32_t(-2); return;}
-    mh[0] = 2;
-    flush_dcache64(pa, kSblBytes, TRUE);
-    mh[0] = 3;
+    if (err) {mh[12] = uint32_t(err) | 0x10000; mh[0] = uint32_t(-2); return;}
+    for (uint32_t off = 0; off < kSblBytes; off += 4096) flush_dcache64(kvtophys(vm_offset_t(va + off)), 4096, TRUE);
+    const uint64_t pa = iova;   // what BHI is given below
+
     // 4: the MHI register space at BAR0 (stage 4 assigned it)
     const uint64_t bar = t970_wifi_stats[16] & ~0xfull;
     Window bw = {};
-    if (!bar || !mapWindow(bw, bar, 0x100000)) {buf->release(); mh[0] = uint32_t(-4); return;}
+    if (!bar || !mapWindow(bw, bar, 0x100000)) {mh[0] = uint32_t(-4); return;}
     struct Io {static uint32_t rd(void *c, uint32_t reg) {return static_cast<volatile uint32_t *>(c)[reg / 4];}
                static void wr(void *c, uint32_t reg, uint32_t v) {static_cast<volatile uint32_t *>(c)[reg / 4] = v; __asm__ volatile("dsb sy" ::: "memory");}};
     MhiIo io = {Io::rd, Io::wr, const_cast<uint32_t *>(bw.va), 0x100000};
     static MhiBoot boot;
-    if (mhi_boot_open(&boot, &io)) {mh[5] = boot.phase | boot.error << 8; release(bw); buf->release(); mh[0] = uint32_t(-4); return;}
+    if (mhi_boot_open(&boot, &io)) {mh[5] = boot.phase | boot.error << 8; release(bw); mh[0] = uint32_t(-4); return;}
     mh[0] = 4;
     // 5: BHI with the boot loader, then step until READY or 3 s
     mhi_boot_begin(&boot, 0, pa, kSblBytes, 0, 0, uint32_t(mach_absolute_time()));
@@ -486,6 +596,7 @@ void wifiStage5() {
     mh[10] = ms;
     mh[11] = bw.va[MHI_STATUS / 4];
     if (boot.phase == MhiNeedContexts) mh[0] = 6;
+    wdom::sample();
     release(bw);
     // the buffer stays: the device may still read it until the next stage resets it
 }
