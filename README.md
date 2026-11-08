@@ -3,7 +3,7 @@
 iPadOS 17.7.11 (21H461) on the **Samsung Galaxy Tab S7+ Wi-Fi (SM-T970, gts7xlwifi, Qualcomm SM8250 / Adreno 650)**, as a
 [UniXNU](https://unixnu.com/) device repository. 中文说明见下方。
 
-## Status (2026-11-05, payload "periph15")
+## Status (2026-11-08, test build "combo7")
 
 | Area | State |
 | --- | --- |
@@ -16,9 +16,14 @@ iPadOS 17.7.11 (21H461) on the **Samsung Galaxy Tab S7+ Wi-Fi (SM-T970, gts7xlwi
 | Touch, keys | STM fts1ba90a over GPIO I2C → HID; PMIC keys |
 | USB | DWC3 + SNPS femto HS PHY; CDC-ACM debug console (`drivers/QcomXnuUsbDebug`) works once the MAX77705 MUIC switch is closed (CONTROL1 0x3f → 0x09, `package/T970WifiProbe.cpp`) |
 | Battery | MAX77705 fuel gauge + charger as IOPMPowerSource (`package/T970Battery.cpp`, `t970-battery=1`); charger watchdog kicked |
-| Wi-Fi | QCA6390 (17cb:1101) on PCIe0: rails, link L0, BAR, MHI/BHI regs (stages 1–4). Stage 5 DMA needs an SMMU context with 32-bit IOVAs (see Chengdong-Yu/pong-wifi); ath11k not ported yet |
-| Shutdown | PSCI SYSTEM_OFF/RESET hooked; still hangs unmounting the OS volume after `IOServicePH::systemHalt` (UFS) |
-| Not started | Audio, sensors (SLPI), Bluetooth, Apple USB device stack (Finder/usbmux) |
+| Audio | Speakers work as the iOS output: ADSP loader (GLINK/SMEM/SMP2P/QMP), APR → AFE/ADM/ASM, PRI TDM, four CS35L41 amps, HAL plug-in (`package/T970Audio.cpp`, `hal/`, `t970-adsp=2 t970-audio=32`). Clean sound since SCLK_INV and the ring fix; quieter than Android (no Cirrus protection firmware yet) |
+| Haptics | Vibration motor on PM8150L LDO7 (`package/T970Haptics.cpp`, `t970-haptics`) |
+| Shutdown | Works: failsafe PSCI call after unmount (`t970-shutdown-failsafe.patch`), amps muted first |
+| Wi-Fi | QCA6390 with Linux ath11k (stage 6, `t970-wifi=6`): firmware reaches mission mode, QRTR/QMI up, board-file download stops on an MHI BAD_TRE; not usable yet |
+| Bluetooth | QCA6390 BT over QUP0 SE6 UART: power, clocks, SMMU and DMA up (`t970-bt`); HCI readback and firmware download in progress |
+| Sensors | All behind the SLPI (FastRPC needed); fake accelerometer/gyro/orientation HID devices for rotation testing (`t970-sensors`); rotation not working yet |
+| Camera | Front/rear/ultra-wide sensors answer over CCI and stream; CSIPHY/CSID receive works (`t970-camera`); nothing in iPadOS consumes frames yet |
+| Known issues | GPU page fault can freeze the system (Settings > Wi-Fi), fix in testing; Apple USB device stack (Finder/usbmux) not started |
 
 ## Not in this repository
 
@@ -44,8 +49,9 @@ with the MUIC switch closed, the live CDC log is `/dev/cu.usbmodem*` on the Mac.
 ## 中文简介
 
 在三星 Galaxy Tab S7+（SM-T970，骁龙 865）上运行 iPadOS 17.7.11。已经可以进入桌面并流畅使用：八核与 4+3+1 调度簇、按负载调频、
-原生 UFS 存储与可持久化的 Data、GPU 加速合成（Adreno 650）、触摸与按键、亮度、USB 调试串口、电量显示。Wi-Fi 进行到第 4 阶段，
-声音、传感器、蓝牙和关机断电还在做。仓库不包含任何苹果、高通、三星的二进制文件，需要从自己的设备提取，见 `proprietary-files.txt`。
+原生 UFS 存储与可持久化的 Data、GPU 加速合成（Adreno 650）、触摸与按键、亮度、USB 调试串口、电量显示，扬声器出声（音质正常，
+音量比安卓小）、振动、关机断电。Wi-Fi（固件已启动，卡在板级数据下载）、蓝牙、传感器（屏幕旋转）、相机还在做；打开“设置”偶尔
+会因 GPU 缺页卡死，修复测试中。仓库不包含任何苹果、高通、三星的二进制文件，需要从自己的设备提取，见 `proprietary-files.txt`。
 
 ## Credits
 
