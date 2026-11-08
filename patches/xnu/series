@@ -11,3 +11,5 @@ t970-text-repage.patch
 t970-mgcache-once.patch
 t970-sandbox-grant-entitlement.patch
 t970-three-clusters.patch
+t970-shutdown-failsafe.patch
+t970-audio-addon-mount.patch

@@ -140,6 +140,11 @@ __attribute__((weak)) volatile uint32_t native_wifi_stats[29];
 __attribute__((weak)) char native_wifi_text[512][112];
 __attribute__((weak)) struct { uint32_t stage, scans, frames, beacons, bss_seen; int last_err; } nw_wifi_stats;
 __attribute__((weak)) volatile uint64_t nw_wifi_where[4];
+__attribute__((weak)) volatile uint32_t t970_wifi_stack[16];
+__attribute__((weak)) volatile uint32_t nw_wifi_wr_n;            // T970Ath11k.c write trace
+__attribute__((weak)) volatile uint32_t nw_wifi_wr[512][3];
+__attribute__((weak)) uint64_t (*volatile nw_wifi_wr_clock)(void);
+__attribute__((weak)) void nw_wifi_wr_note(uint32_t off, uint32_t v) {(void)off; (void)v;}   // the real one is in libT970Wifi.a (T970WifiStack.cpp)
 __attribute__((weak)) void sheng_cpufreq_poll(void);
 __attribute__((weak)) void sheng_cpufreq_poll(void) { }
 
@@ -246,6 +251,16 @@ __attribute__((weak)) void native_hid_input_observed(unsigned code, int value) {
 }
 __attribute__((weak)) void native_hid_live_checkpoint(void *service) { (void) service; }
 __attribute__((weak)) void native_buttons_set_sink(void (*sink)(void *, uint32_t), void *context) {
+  (void) sink; (void) context;
+}
+// The accelerometer HID device's sink; package/T970Sensors.cpp defines the real one.
+__attribute__((weak)) void native_accel_set_sink(void (*sink)(void *, uint64_t), void *context) {
+  (void) sink; (void) context;
+}
+__attribute__((weak)) void native_orient_set_sink(void (*sink)(void *, uint64_t), void *context) {
+  (void) sink; (void) context;
+}
+__attribute__((weak)) void native_gyro_set_sink(void (*sink)(void *, uint64_t), void *context) {
   (void) sink; (void) context;
 }
 __attribute__((weak)) uint64_t native_legacy_client_class[64];

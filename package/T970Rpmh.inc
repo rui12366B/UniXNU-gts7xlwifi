@@ -147,9 +147,11 @@ FindTouchResource (UINT32 *Address, UINT64 Start)
       if ((MmioRead32 (Header) == mKey0) &&
           (MmioRead32 (Header + 4) == mKey1) && (Matches == 0)) {
         Found = MmioRead32 (Header + 16);
-        if ((Slave != 4) || (Found > 0x7FFFFU) ||
-            ((Found & 3) != 0) || (((Found >> 16) & 7) != 4) ||
-            ((((Found + 4) >> 16) & 7) != 4)) {
+        // VRM (slave 4) and, for the audio DSP's lcx.lvl/lmx.lvl level votes (package/T970Adsp.cpp), ARC (slave 3): word 0 only.
+        if (((Slave != 4) && (Slave != 3)) || (Found > 0x7FFFFU) ||
+            ((Found & 3) != 0) || (((Found >> 16) & 7) != Slave) ||
+            ((Slave == 3) && (mWord != 0)) ||
+            ((((Found + 4) >> 16) & 7) != Slave)) {
           return EFI_COMPROMISED_DATA;
         }
         Matches++;

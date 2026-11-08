@@ -37,7 +37,7 @@ extern "C" {
 volatile uint32_t t970_wifi_stats[28];
 // The VRM resources the command DB names (0x80860000, the layout T970Rpmh.inc reads), space-separated, and each rail's vote result.
 char t970_wifi_cmddb[640];
-volatile int32_t t970_wifi_rail_rc[8];
+volatile int32_t t970_wifi_rail_rc[12];   // [0..4] rails, [8..11] periph24 clocks rfclka1 rfclka3 lnbclka2 lnbclka3
 // Stage 5a, read only: the apps SMMU (0x15000000) as UEFI left it, for the PCIe streams 0x1c00 (root port) and 0x1c01 (endpoint).
 // [0] sCR0 (bit 0 CLIENTPD: all bypass; bit 10 USFCFG: unmatched streams fault), [1] IDR0 (NUMSMRG bits 7:0), [2] SMRs valid,
 // [3] index of the SMR matching 0x1c01 (0xffff none), [4] that SMR, [5] its S2CR (type bits 17:16: 0 translate, 1 bypass, 2 fault;
@@ -56,6 +56,26 @@ volatile uint32_t t970_wifi_mhi[13];
 // [9..10] FAR, [11] FSYNR0. periph17: while install() runs [0] is 0x1000 + step and [12] the bank, [13] the register offset being
 // touched, so the boot log's compose() (which reads these live) shows where a stuck access stopped.
 volatile uint32_t t970_wifi_dom[14];
+// periph18 BHI wait trace: per sample bit 31 BHI status all-ones, 30:29 BHI transfer status, 28 MHISTATUS all-ones, 27:24 EE,
+// 23:16 MHI state, 15 READY, 14 MHICTRL.RESET, 13:10 MhiBoot phase, 9:0 time in 100 ms; [26] samples
+volatile uint32_t t970_wifi_trace[27];
+// periph19 ath11k sw_reset: [0] LTSSM, [1] HOT_RST, [2] fix_l1ss failures (bit per register), [3] Q6 cookie, [4] WARM_SW_ENTRY before,
+// [5] SOC reset cause, [6] SOC_GLOBAL_RESET after, [7] MHISTATUS after the reset, [8] 1 done
+volatile uint32_t t970_wifi_rst[9];
+// periph20 image check and BHI error: [0..3] see the copy check, [4] BHI_STATUS at the first error, [5] ERRCODE, [6..8] ERRDBG1..3, [9] ms
+// periph21: [10] SMMU sGFSR before BHI, [11] sGFSR after, [12] sGFSYNR0, [13] sGFSYNR1 (stream ID of an unmatched access), [14] sGFSYNR2,
+// [15] TCSR_SOC_HW_VERSION (BAR 0x224), [16] the SMR written, [17] bank FSR at the BHI error
+volatile uint32_t t970_wifi_chk[18];
+// periph23 PBL debug after the BHI error (cnss2 cnss_pci_dump_qca6390_sram_mem): [0] TCSR_PBL_LOGGING 0x1b000f8, [1] PBL_WLAN_BOOT_CFG
+// 0x1e22b34, [2] PBL_BOOTSTRAP_STATUS 0x1910008, [3] PCIE_BHI_ERRDBG2 0x1e0e238, [4] QFPROM_PWR_CTRL after the write, [5..24] PBL log
+// SRAM 0x1403d58 (80 bytes), [25] 1 done
+volatile uint32_t t970_wifi_pbl[26];
+// periph27 MSI and ASPM, as UniXNU-sheng WifiProbe endpointLinkSetup and the endpoint Samsung's cnss2 left (TWRP: MSI on, 32 vectors,
+// address 0xa0000040, data 0x320; sheng: ASPM off during the load, MSI into a sink page polled later): [0] PCIe LNKCTL before,
+// [1] MSI control after, [2] MSI address read back, [3] 1 set up, [4..7] the sink's first words after the BHI wait, [8] non-zero words
+// in the sink page, [9] its first non-zero offset + 1
+volatile uint32_t t970_wifi_msi[10];
+constexpr uint64_t kMsiSink = 0xa0000000ull + (4u << 20) - 4096;   // the arena's last page (wdom::kIova + kArenaBytes - 4096)
 // MAX77705 MUIC USB-2 switch (before the late USB retry; t970-muic=0 skips it): [0] step (1 bus answered, 2 switched to USB, 3 already USB,
 // negative: failed step), [1] UIC_HW_REV << 8 | UIC_FW_REV, [2] USBC_STATUS1 << 16 | USBC_STATUS2 << 8 | BC_STATUS, [3] CONTROL1 read
 // before (DATAIN0 << 8 | DATAIN1), [4] CONTROL1 read after, [5] NACKs, [6] CC_STATUS0 << 8 | CC_STATUS1, [7] UIC_INT before the reads
@@ -74,6 +94,18 @@ extern "C" void qcom_usb_debug_peek_status(void *status) __attribute__((weak_imp
 extern "C" void qcom_usb_debug_t970_faults(uint32_t out[16]) __attribute__((weak_import));
 extern "C" processor_t cpu_to_processor(int cpu);
 extern "C" processor_t thread_bind(processor_t processor);
+// Stage 6 (t970-wifi=6): the full ath11k stack, package/T970WifiStack.cpp in build/t970-wifi/libT970Wifi.a (scripts/build-t970-wifi.py).
+extern "C" void t970_wifi_stack_run(uint64_t barPa) __attribute__((weak_import));
+// int9: stage 5's BAR writes into the same write trace as stage 6 (T970Ath11k.c nw_wifi_wr_note), for a register-level diff.
+extern "C" void nw_wifi_wr_note(uint32_t off, uint32_t v) __attribute__((weak_import));
+extern "C" uint64_t (*volatile nw_wifi_wr_clock)(void) __attribute__((weak_import));
+static uint64_t t970us() {uint64_t ns = 0; absolutetime_to_nanoseconds(mach_absolute_time(), &ns); return ns / 1000;}
+static inline void t970wr(uint32_t off, uint32_t v) {
+    if (&nw_wifi_wr_clock && !nw_wifi_wr_clock) nw_wifi_wr_clock = t970us;
+    if (&nw_wifi_wr_note) nw_wifi_wr_note(off, v);
+}
+// stage 4's endpoint configuration writes (shared by stages 5 and 6), traced as 4-byte config writes
+static inline void t970cfg(volatile uint32_t *c, uint32_t word, uint32_t v) {t970wr(0x84000000u | (word * 4), v); c[word] = v;}
 
 
 namespace {
@@ -192,6 +224,12 @@ int powerRails() {
         IOSleep(2);
     }
     t970_wifi_stats[5] = ok;
+    // periph24: the PMIC clock outputs the command DB lists (clk-rpmh: one word, 1 = on). The PBL runs from the chip's own oscillator,
+    // then fails 300 ms after the boot loader arrives (ERRCODE ef0e0003, PBL stage 0x0e02), which fits a wait for an XO that never comes.
+    // Which output feeds QCA6390's XO is not in the FDT (cnss names no clock), so all four the SoC side does not obviously own go on.
+    static const char *const clocks[] = {"rfclka1", "rfclka3", "lnbclka2", "lnbclka3"};
+    for (unsigned i = 0; i < 4; ++i) t970_wifi_rail_rc[8 + i] = t970_rpmh_write(clocks[i], 0, 1);
+    IOSleep(5);
     return first;
 }
 
@@ -211,16 +249,41 @@ void endpointProbe(volatile uint32_t *a, volatile uint32_t *c, volatile uint32_t
     d[0x20 / 4] = uint32_t(((kMemBase + kMemSize - 1) & 0xfff00000u) | ((kMemBase >> 16) & 0xfff0u));
     st[0] = 18;
     const uint32_t saved = c[0x10 / 4];
-    c[0x10 / 4] = 0xffffffffu;
+    t970cfg(c, 0x10 / 4, 0xffffffffu);
     const uint32_t mask = c[0x10 / 4];
-    c[0x10 / 4] = saved;
+    t970cfg(c, 0x10 / 4, saved);
     st[15] = mask;
     const uint32_t size = ~(mask & ~0xfu) + 1;
     if (!(mask & ~0xfu) || !size || size > kMemSize) {st[0] = -18; return;}
     const uint32_t address = uint32_t((kMemBase + size - 1) & ~uint64_t(size - 1));
-    c[0x10 / 4] = address | (mask & 0xfu);
-    if ((mask & 6u) == 4u) c[0x14 / 4] = 0;
-    c[0x04 / 4] = (c[0x04 / 4] & 0xffffu) | 0x6u;
+    t970cfg(c, 0x10 / 4, address | (mask & 0xfu));
+    if ((mask & 6u) == 4u) t970cfg(c, 0x14 / 4, 0);
+    t970cfg(c, 0x04 / 4, (c[0x04 / 4] & 0xffffu) | 0x6u);
+    {   // periph27: ASPM off and MSI on (4 vectors, data 0) into the sink page, before anything is loaded
+        unsigned ms = 1;
+        PE_parse_boot_argn("t970-wifi-msi", &ms, sizeof ms);
+        uint8_t cap = uint8_t(c[0x34 / 4] & 0xff);
+        for (unsigned guard = 0; ms && cap >= 0x40 && guard < 48; ++guard) {
+            const uint32_t w = c[cap / 4];
+            const uint8_t id = uint8_t(w), next = uint8_t(w >> 8);
+            if (id == 0x10) {
+                const uint32_t lc = c[(cap + 0x10) / 4];
+                t970_wifi_msi[0] = lc;
+                t970cfg(c, (cap + 0x10) / 4, lc & ~3u);
+            } else if (id == 0x05) {
+                const bool is64 = (w >> 16) & 0x80;
+                t970cfg(c, (cap + 4) / 4, uint32_t(kMsiSink));
+                if (is64) {t970cfg(c, (cap + 8) / 4, uint32_t(kMsiSink >> 32)); t970cfg(c, (cap + 0xc) / 4, 0);}
+                else t970cfg(c, (cap + 8) / 4, 0);
+                t970cfg(c, cap / 4, (w & 0xffffu) | ((((w >> 16) & ~0x70u) | 0x20u | 1u) << 16));
+                t970_wifi_msi[1] = c[cap / 4];
+                t970_wifi_msi[2] = c[(cap + 4) / 4];
+                t970_wifi_msi[3] = 1;
+            }
+            cap = next;
+        }
+        __asm__ volatile("dsb sy" ::: "memory");
+    }
     st[16] = c[0x10 / 4];
     st[17] = c[0x04 / 4];
     st[0] = 19;
@@ -322,6 +385,15 @@ void bringUp(volatile uint32_t *g, unsigned level) {
     }
     d[kBusNumbers / 4] = 0x00010100;
     d[kCommand / 4] |= 0x6u;
+    // periph25: train at 2.5 GT/s. Samsung's msm_pcie (TWRP dmesg "PCIe RC0 Target GEN1 ... Current GEN1") leaves the root port's
+    // LNKCTL2 (DBI 0xa0) at 0x00010001; at the Gen2 this file trained to (LNKSTA 0xb012) the PBL read the SBL and rejected it
+    // (ERRCODE ef0e0003) although DRAM held the right bytes. t970-wifi-gen=2 keeps Gen2 for comparison.
+    {
+        unsigned gen = 1;
+        PE_parse_boot_argn("t970-wifi-gen", &gen, sizeof gen);
+        if (gen < 1 || gen > 3) gen = 1;
+        d[0xa0 / 4] = (d[0xa0 / 4] & ~0xfu) | gen;
+    }
     st[7] = d[0];
     st[0] = 15;
     // 16: PERST# held low >= 100 ms, released, LTSSM enable, wait for L0 (port debug 0 state 0x11, debug 1 bit 4 link up)
@@ -411,7 +483,7 @@ constexpr uint32_t kSblBytes = 0x80000;
 // QcomUsbDmaDomain takes them from the bottom up.
 namespace wdom {
 constexpr uint64_t kSmmu = 0x15000000, kSmmuBytes = 0x100000, kIova = 0xa0000000;
-constexpr uint32_t kStream = 0x1c01, kArenaBytes = 4u << 20, kL3Tables = kArenaBytes >> 21, kTablePages = 2 + kL3Tables;
+constexpr uint32_t kStream = 0x1c00, kStreamMask = 0x7f, kArenaBytes = 4u << 20, kL3Tables = kArenaBytes >> 21, kTablePages = 2 + kL3Tables;
 constexpr uint64_t kLeaf = 0x0060000000000f43ull;   // AF, inner shareable, nG, AP EL0 RW, UXN/PXN, page; AttrIndx 0
 Window gSmmu;
 IOBufferMemoryDescriptor *gTables, *gArena;
@@ -447,7 +519,7 @@ int install() {
         if (!(smr & (1u << 31))) {if (freeSmr == 0xffff) freeSmr = i; continue;}
         const uint32_t id = smr & 0x7fff, mask = (smr >> 16) & 0x7fff;
         if (((s2cr >> 16) & 3) == 0 && (s2cr & 0xff) < banks) used[s2cr & 0xff] = true;
-        if (((kStream ^ id) & ~mask & 0x7fff) == 0) {d[3] = i | 0x10000; return -4;}
+        if (((kStream ^ id) & ~(mask | kStreamMask) & 0x7fff) == 0) {d[3] = i | 0x10000; return -4;}
     }
     if (freeSmr == 0xffff) return -5;
     // the bank: from the top, stage-1 capable (>= NUMS2CB), not routed to, translation off, no recorded fault
@@ -497,6 +569,11 @@ int install() {
         if (!pa || (pa & 4095)) return -11;
         t[1024 + off / 4096] = (pa & 0x0000fffffffff000ull) | kLeaf;
     }
+    // periph22 (t970-wifi-hole=N): leave page N-1 of the arena unmapped, so a device read of it must fault in this bank (FSR TF,
+    // FAR = the address). hole=1 (page 0) showed the reads reach the SMMU; periph26 uses 0x27 (page 0x26, the end of the last SBL
+    // segment, ELF offset 0x26000-0x27470) to see whether the PBL reads the whole boot loader before it gives up.
+    unsigned hole = 0;
+    if (PE_parse_boot_argn("t970-wifi-hole", &hole, sizeof hole) && hole >= 1 && hole <= kArenaBytes / 4096) t[1024 + hole - 1] = 0;
     flush_dcache64(tpa, kTablePages * 4096, TRUE);
     step(7);
     // the context bank, disabled while written
@@ -507,7 +584,13 @@ int install() {
     w32(gCbBase + 0x30, 0x803520);                                            // TCR
     w64(gCbBase + 0x20, tpa | uint64_t(gAsid) << 48);                         // TTBR0
     w64(gCbBase + 0x28, uint64_t(gAsid) << 48);                               // TTBR1
-    w32(gCbBase + 0x38, 0x44); w32(gCbBase + 0x3c, 0);                         // MAIR0/1: attr 0 Normal-NC
+    // MAIR0 attr 0: periph27 default Normal write-back (0xff), as Samsung's dma-coherent PCIe0 with qcom,iommu-pagetable "coherent";
+    // periph26 showed the PBL reads every SBL page (fault at 0xa0026000) and still fails the check after the load (stage 0x0e, code 3)
+    // with Normal-NC (0x44). t970-wifi-mair=0x44 restores that.
+    unsigned mair = 0xff;
+    PE_parse_boot_argn("t970-wifi-mair", &mair, sizeof mair);
+    w32(gCbBase + 0x38, mair & 0xff); w32(gCbBase + 0x3c, 0);
+    t970_wifi_msi[3] |= (mair & 0xff) << 8;
     w32(gCbBase + 0x34, 0);                                                   // CONTEXTIDR
     step(8);
     w32(gCbBase + 0x610, gAsid);                                              // TLBIASID
@@ -519,7 +602,10 @@ int install() {
     w32(gCbBase, 0x27);                                                       // SCTLR: CFRE AFE TRE M
     step(10);
     w32(0xc00 + 4 * freeSmr, gCb);                                            // S2CR: translate via the bank
-    w32(0x800 + 4 * freeSmr, (1u << 31) | kStream);                           // SMR: valid, exact 0x1c01
+    // periph21: the whole PCIe0 stream range (sm8250.dtsi pcie0 iommus = <&apps_smmu 0x1c00 0x7f>), not only 0x1c01: periph17-20 saw
+    // no fault in this bank, so the endpoint's reads may carry another stream ID
+    w32(0x800 + 4 * freeSmr, (1u << 31) | kStreamMask << 16 | kStream);
+    t970_wifi_chk[16] = r32(0x800 + 4 * freeSmr);
     gIndex = freeSmr;
     d[7] = r32(gCbBase + 0x58);
     return 0;
@@ -529,6 +615,7 @@ void sample() {
     if (!gSmmu.va || gCb == 0xffff) return;
     volatile uint32_t *d = t970_wifi_dom;
     d[8] = r32(gCbBase + 0x58);
+    t970_wifi_chk[11] = r32(0x48); t970_wifi_chk[12] = r32(0x50); t970_wifi_chk[13] = r32(0x54); t970_wifi_chk[14] = r32(0x58);
     const uint64_t far = r64(gCbBase + 0x60);
     d[9] = uint32_t(far); d[10] = uint32_t(far >> 32); d[11] = r32(gCbBase + 0x68);
 }
@@ -542,6 +629,8 @@ void wifiStage5() {
         t970_wifi_dom[0] = uint32_t(rc ? rc : 1);
         if (rc) {mh[0] = uint32_t(-1); return;}
         mh[1] = wdom::gIndex | wdom::gCb << 8;
+        memset(wdom::gArenaVa + (kMsiSink - wdom::kIova), 0, 4096);
+        flush_dcache64(kvtophys(vm_offset_t(wdom::gArenaVa + (kMsiSink - wdom::kIova))), 4096, TRUE);
     }
     mh[0] = 1;
     // 2: the boot loader from Data (the GPU addon writes /private/var/ngpu/firmware/qca6390 before its mount; wait up to 90 s)
@@ -566,6 +655,28 @@ void wifiStage5() {
     sheng_fw_close(fw);
     if (err) {mh[12] = uint32_t(err) | 0x10000; mh[0] = uint32_t(-2); return;}
     for (uint32_t off = 0; off < kSblBytes; off += 4096) flush_dcache64(kvtophys(vm_offset_t(va + off)), 4096, TRUE);
+    // periph20: what the device reads is DRAM, not the cache: compare every page through an uncached mapping of its physical address
+    // and, where it differs, write the page through that mapping. t970_wifi_chk: [0] pages differing, [1] first such page, [2] pages
+    // still differing after the rewrite, [3] pages checked.
+    for (uint32_t off = 0; off < kSblBytes; off += 4096) {
+        IODeviceMemory *pm = IODeviceMemory::withRange(kvtophys(vm_offset_t(va + off)), 4096);
+        IOMemoryMap *mp = pm ? pm->map(kIOMapAnywhere | kIOMapInhibitCache) : nullptr;
+        if (pm) pm->release();
+        if (!mp) continue;
+        volatile uint32_t *u = reinterpret_cast<volatile uint32_t *>(mp->getVirtualAddress());
+        const uint32_t *c = reinterpret_cast<const uint32_t *>(va + off);
+        bool differ = false;
+        for (unsigned k = 0; k < 1024; ++k) if (u[k] != c[k]) {differ = true; break;}
+        if (differ) {
+            if (!t970_wifi_chk[0]) t970_wifi_chk[1] = off / 4096;
+            ++t970_wifi_chk[0];
+            for (unsigned k = 0; k < 1024; ++k) u[k] = c[k];
+            __asm__ volatile("dsb sy" ::: "memory");
+            for (unsigned k = 0; k < 1024; ++k) if (u[k] != c[k]) {++t970_wifi_chk[2]; break;}
+        }
+        ++t970_wifi_chk[3];
+        mp->release();
+    }
     const uint64_t pa = iova;   // what BHI is given below
 
     // 4: the MHI register space at BAR0 (stage 4 assigned it)
@@ -573,21 +684,105 @@ void wifiStage5() {
     Window bw = {};
     if (!bar || !mapWindow(bw, bar, 0x100000)) {mh[0] = uint32_t(-4); return;}
     struct Io {static uint32_t rd(void *c, uint32_t reg) {return static_cast<volatile uint32_t *>(c)[reg / 4];}
-               static void wr(void *c, uint32_t reg, uint32_t v) {static_cast<volatile uint32_t *>(c)[reg / 4] = v; __asm__ volatile("dsb sy" ::: "memory");}};
+               static void wr(void *c, uint32_t reg, uint32_t v) {t970wr(reg, v); static_cast<volatile uint32_t *>(c)[reg / 4] = v; __asm__ volatile("dsb sy" ::: "memory");}};
+    // periph19: ath11k_pci_sw_reset(power_on) before MHI, as Linux v6.6 drivers/net/wireless/ath/ath11k/pci.c does for QCA6390
+    // (qca6390_regs). Its WARs match periph18 (BHI succeeded, EE stayed PBL): a Hotreset leaves an interrupt pending that crashes the
+    // SBL as soon as it unmasks it (clear_all_intrs), and a non-zero WLAON_WARM_SW_ENTRY sends the Q6 down the warm path into a
+    // dead loop (clear_dbg_registers). Offsets above 512 KiB go through the register window (0x310c).
+    {
+        volatile uint32_t *b = bw.va;
+        volatile uint32_t *rr = t970_wifi_rst;
+        struct W {
+            static uint32_t at(volatile uint32_t *v, uint32_t off) {
+                if (off < 0x80000) return off;
+                t970wr(0x310c, 0x40000000u | ((off >> 19) & 0x3f));
+                v[0x310c / 4] = 0x40000000u | ((off >> 19) & 0x3f); __asm__ volatile("dsb sy" ::: "memory");
+                (void)v[0x310c / 4];
+                return 0x80000 + (off & 0x7ffff);
+            }
+            static uint32_t rd(volatile uint32_t *v, uint32_t off) {return v[at(v, off) / 4];}
+            static void wr(volatile uint32_t *v, uint32_t off, uint32_t x) {const uint32_t o = at(v, off); t970wr(o, x); v[o / 4] = x; __asm__ volatile("dsb sy" ::: "memory");}
+            static int link(volatile uint32_t *v, uint32_t off, uint32_t val, uint32_t mask) {
+                uint32_t x = rd(v, off);
+                if ((x & mask) == val) return 0;
+                for (int i = 0; i < 10; ++i) {wr(v, off, (x & ~mask) | val); x = rd(v, off); if ((x & mask) == val) return 0; IODelay(2000);}
+                return 1;
+            }
+        };
+        IODelay(100000);
+        uint32_t v = W::rd(b, 0x1e081b0);                                   // PCIE_PCIE_PARF_LTSSM
+        for (int i = 0; v != 0x111 && i < 5; ++i) {if (v == 0xffffffffu) IODelay(5000); W::wr(b, 0x1e081b0, 0x111); v = W::rd(b, 0x1e081b0);}
+        rr[0] = v;
+        W::wr(b, 0x1e402bc, W::rd(b, 0x1e402bc) | 0x10);                   // GCC_GCC_PCIE_HOT_RST
+        rr[1] = W::rd(b, 0x1e402bc);
+        IODelay(5000);
+        W::wr(b, 0x1e08228, 0xffffffffu);                                   // PCIE_PCIE_INT_ALL_CLEAR
+        // WLAON_QFPROM_PWR_CTRL_REG: VDD4BLOW and SHUTDOWN_EN off (periph23: cnss2 set_wlaon_pwr_ctrl(false, false, ...) clears bit 0 too)
+        W::wr(b, 0x1f8031c, W::rd(b, 0x1f8031c) & ~5u);
+        t970_wifi_pbl[4] = W::rd(b, 0x1f8031c);
+        rr[2] = W::link(b, 0x1e0c0ac, 0x10, 0xffffffffu) | W::link(b, 0x1e0c628, 0x02, 0xff) << 1 |   // fix_l1ss
+                W::link(b, 0x1e0c62c, 0x52, 0xff) << 2 | W::link(b, 0x1e0c634, 0xff, 0xff) << 3;
+        W::wr(b, 0x360, 0); W::wr(b, 0x368, 0); W::wr(b, 0x394, 0); W::wr(b, 0x39c, 0);   // ath11k_mhi_clear_vector
+        rr[3] = W::rd(b, 0x1f80500);                                        // PCIE_Q6_COOKIE_ADDR
+        rr[4] = W::rd(b, 0x1f80504);                                        // WLAON_WARM_SW_ENTRY
+        IODelay(10000);
+        W::wr(b, 0x1f80504, 0);
+        IODelay(10000);
+        rr[5] = W::rd(b, 0x1f8060c);                                        // WLAON_SOC_RESET_CAUSE_REG (read-clear)
+        v = W::rd(b, 0x3008);                                               // PCIE_SOC_GLOBAL_RESET
+        W::wr(b, 0x3008, v | 1); IODelay(10000); W::wr(b, 0x3008, v & ~1u); IODelay(10000);
+        rr[6] = W::rd(b, 0x3008);
+        rr[7] = b[0x48 / 4];                                                // MHISTATUS after the reset
+        t970wr(0x38, 2); b[0x38 / 4] = 2; __asm__ volatile("dsb sy" ::: "memory");            // MHICTRL_RESET (clears the SYSERR the reset leaves)
+        IODelay(10000);
+        rr[8] = 1;
+    }
     MhiIo io = {Io::rd, Io::wr, const_cast<uint32_t *>(bw.va), 0x100000};
     static MhiBoot boot;
     if (mhi_boot_open(&boot, &io)) {mh[5] = boot.phase | boot.error << 8; release(bw); mh[0] = uint32_t(-4); return;}
     mh[0] = 4;
     // 5: BHI with the boot loader, then step until READY or 3 s
+    t970_wifi_chk[10] = wdom::r32(0x48);                                  // sGFSR before the transfer
+    t970_wifi_chk[15] = bw.va[0x224 / 4];                                // TCSR_SOC_HW_VERSION (ath11k pci.c)
     mhi_boot_begin(&boot, 0, pa, kSblBytes, 0, 0, uint32_t(mach_absolute_time()));
     mh[0] = 5;
-    unsigned ms = 0;
-    for (; ms < 3000; ++ms) {
+    // periph19: up to 20 s (ath11k MHI_TIMEOUT_DEFAULT_MS), with a sample every 800 ms of what the device shows (t970_wifi_trace).
+    unsigned ms = 0, samples = 0;
+    for (; ms < 20000; ++ms) {
         const uint32_t phase = mhi_boot_step(&boot);
+        if (!t970_wifi_chk[4]) {
+            const uint32_t bs = bw.va[(boot.bhi + MHI_BHI_STATUS) / 4];
+            if (bs >> 30 == 3) {
+                t970_wifi_chk[4] = bs; t970_wifi_chk[5] = bw.va[(boot.bhi + MHI_BHI_ERRCODE) / 4];
+                t970_wifi_chk[6] = bw.va[(boot.bhi + 0x34) / 4]; t970_wifi_chk[7] = bw.va[(boot.bhi + 0x38) / 4];
+                t970_wifi_chk[8] = bw.va[(boot.bhi + 0x3c) / 4]; t970_wifi_chk[9] = ms;
+                t970_wifi_chk[17] = wdom::r32(wdom::gCbBase + 0x58);
+            }
+        }
+        if (ms % 800 == 0 && samples < 26) {
+            const uint32_t st = bw.va[MHI_STATUS / 4], bhi = bw.va[(boot.bhi + MHI_BHI_STATUS) / 4], ee = bw.va[(boot.bhi + MHI_BHI_EXECENV) / 4];
+            const uint32_t ctrl = bw.va[MHI_CTRL / 4];
+            t970_wifi_trace[samples++] = (bhi == 0xffffffffu ? 1u << 31 : (bhi >> 30) << 29) | (st == 0xffffffffu ? 1u << 28 : 0) |
+                                         (ee & 0xf) << 24 | ((st >> MHI_STATE_SHIFT) & 0xff) << 16 | (st & MHI_STATUS_READY) << 15 |
+                                         (ctrl & MHI_CTRL_RESET) << 13 | (phase & 0xf) << 10 | ((ms / 100) & 0x3ff);
+            t970_wifi_trace[26] = samples;
+        }
         if (phase == MhiNeedContexts || phase == MhiFailed || phase == MhiDone) break;
         IOSleep(1);
     }
-    if (ms == 3000) mhi_boot_timeout(&boot);
+    if (ms == 20000) mhi_boot_timeout(&boot);
+    {   // periph23: what the PBL logged (offsets above 512 KiB through the 0x310c window)
+        volatile uint32_t *b = bw.va;
+        auto rd = [b](uint32_t off) -> uint32_t {
+            b[0x310c / 4] = 0x40000000u | ((off >> 19) & 0x3f); __asm__ volatile("dsb sy" ::: "memory");
+            (void)b[0x310c / 4];
+            return b[(0x80000 + (off & 0x7ffff)) / 4];
+        };
+        volatile uint32_t *pb = t970_wifi_pbl;
+        pb[0] = rd(0x1b000f8); pb[1] = rd(0x1e22b34); pb[2] = rd(0x1910008); pb[3] = rd(0x1e0e238);
+        for (unsigned k = 0; k < 20; ++k) pb[5 + k] = rd(0x1403d58 + 4 * k);
+        pb[25] = 1;
+    }
     mh[5] = boot.phase | boot.error << 8 | boot.failed_phase << 16;
     mh[6] = mhi_boot_ee(&boot);
     mh[7] = mhi_boot_state(&boot);
@@ -597,6 +792,17 @@ void wifiStage5() {
     mh[11] = bw.va[MHI_STATUS / 4];
     if (boot.phase == MhiNeedContexts) mh[0] = 6;
     wdom::sample();
+    {   // periph27: did the endpoint write an MSI into the sink?
+        IODeviceMemory *pm = IODeviceMemory::withRange(kvtophys(vm_offset_t(wdom::gArenaVa + (kMsiSink - wdom::kIova))), 4096);
+        IOMemoryMap *mp = pm ? pm->map(kIOMapAnywhere | kIOMapInhibitCache) : nullptr;
+        if (pm) pm->release();
+        if (mp) {
+            volatile uint32_t *u = reinterpret_cast<volatile uint32_t *>(mp->getVirtualAddress());
+            for (unsigned k = 0; k < 4; ++k) t970_wifi_msi[4 + k] = u[k];
+            for (unsigned k = 0; k < 1024; ++k) if (u[k]) {if (!t970_wifi_msi[8]) t970_wifi_msi[9] = k * 4 + 1; ++t970_wifi_msi[8];}
+            mp->release();
+        }
+    }
     release(bw);
     // the buffer stays: the device may still read it until the next stage resets it
 }
@@ -818,6 +1024,17 @@ void wifiThread(void *arg, wait_result_t) {
     t970_wifi_stats[4] = pinWord();
     t970_wifi_stats[0] = 2;
     if (level >= 2) bringUp(g, level);
+    // stage 6 skips stage 5's hand-made BHI load and its SMMU context: ath11k resets and boots the chip itself through MHI, in the
+    // stack's own SMMU context (T970WifiStack.cpp). Its worker runs on this thread from here on.
+    if (level >= 6) {
+        if (t970_wifi_stats[0] == 20 && &t970_wifi_stack_run) t970_wifi_stack_run(t970_wifi_stats[16] & ~0xfull);
+        // the stack returns only when it stopped: hold the chip in reset (PERST# low, then WLAN_EN low), so nothing more comes from it
+        setPin(gPerst, 1u | 1u << 9, 0);
+        IOSleep(10);
+        setPin(gWlanEn, 3u | 7u << 6 | 1u << 9, 0);
+        release(gcc);
+        return;
+    }
     if (level >= 5) {smmuSurvey(); if (t970_wifi_stats[0] == 20) wifiStage5();}
     release(gcc);   // pins and PCIe stay mapped and powered for a later stage
 }

@@ -146,9 +146,48 @@ extern volatile uint32_t native_dpu_pipes[54] __attribute__((weak_import));
 extern volatile int32_t native_adsp_stats[16] __attribute__((weak_import));
 extern volatile int32_t native_audio_stats[16] __attribute__((weak_import));
 extern char native_adsp_text[96] __attribute__((weak_import));
+extern volatile int32_t t970_audio_stats[16] __attribute__((weak_import));
+extern volatile int32_t t970_audio_cmd[16] __attribute__((weak_import));
+extern volatile uint32_t t970_audio_dma[8] __attribute__((weak_import));
+extern volatile uint32_t t970_audio_amp[4][4] __attribute__((weak_import));
+extern volatile uint32_t t970_audio_i2c[3] __attribute__((weak_import));
+extern volatile uint32_t t970_audio_trace[25] __attribute__((weak_import));
+extern volatile uint32_t t970_audio_clk[4][4] __attribute__((weak_import));
+extern volatile uint32_t t970_audio_stream[16] __attribute__((weak_import));
+extern volatile int32_t t970_audio_timing[8] __attribute__((weak_import));
+extern volatile int32_t t970_audio_vol[16] __attribute__((weak_import));
+extern volatile uint32_t t970_audio_bytes[12] __attribute__((weak_import));
+extern volatile uint32_t t970_audio_bst[12] __attribute__((weak_import));
+extern volatile uint32_t t970_audio_cap[8] __attribute__((weak_import));
+extern volatile uint32_t t970_audio_ab[4] __attribute__((weak_import));
+extern volatile int16_t t970_audio_cap_p[512] __attribute__((weak_import)), t970_audio_cap_k[512] __attribute__((weak_import));
+extern volatile uint32_t t970_audio_hal[12] __attribute__((weak_import));
+extern volatile int32_t t970_audio_service[8] __attribute__((weak_import));
+extern volatile uint64_t t970_audio_clock[4] __attribute__((weak_import));
+extern volatile int native_gpu_addon4_stage __attribute__((weak_import));
+extern volatile int native_gpu_addon4_status __attribute__((weak_import));
 extern volatile int32_t native_battery_stats[16] __attribute__((weak_import));
 // T970Battery.cpp (periph14): stage, permille, mV, mA, deci-C, flags, full/design mAh, cycles, samples, failures, charger regs.
 extern volatile int32_t t970_battery[13] __attribute__((weak_import));
+// T970Haptics.cpp: stage, last vote rc, pulses, last ms, failed votes, boot test rc, refused requests, rail-off rc.
+extern volatile int32_t t970_haptics[8] __attribute__((weak_import));
+extern volatile int32_t t970_sensors[16] __attribute__((weak_import));
+extern volatile int32_t t970_accel[8] __attribute__((weak_import));
+extern volatile uint32_t t970_sensors_srv[8] __attribute__((weak_import));
+extern char t970_sensors_text[96] __attribute__((weak_import));
+extern volatile uint32_t native_accel_hid[5] __attribute__((weak_import));
+extern volatile uint32_t native_orient_hid[5] __attribute__((weak_import));
+extern volatile uint32_t native_gyro_hid[5] __attribute__((weak_import));
+extern volatile uint32_t native_hid_gyro_status __attribute__((weak_import));
+extern volatile int32_t t970_orient[4] __attribute__((weak_import));
+extern volatile uint32_t native_hid_accel_status __attribute__((weak_import));
+extern volatile uint32_t native_hid_orient_status __attribute__((weak_import));
+extern volatile int32_t t970_camera[40] __attribute__((weak_import));
+extern volatile uint8_t t970_camera_thumb[64 * 48] __attribute__((weak_import));
+// T970Bluetooth.cpp: stage/error/ids (see the file's header), and its start-up lines, '|' separated.
+extern volatile int32_t t970_bt[32] __attribute__((weak_import));
+extern char t970_bt_text[1024] __attribute__((weak_import));
+extern volatile uint32_t t970_bt_cp[3] __attribute__((weak_import));
 extern volatile uint32_t native_swipe_stats[16] __attribute__((weak_import));
 extern volatile int32_t native_touch_extent[4] __attribute__((weak_import));
 extern volatile uint32_t native_adreno_method_stats[20][4] __attribute__((weak_import));
@@ -201,7 +240,7 @@ extern void qcom_usb_debug_peek_status(void *status) __attribute__((weak_import)
 // gts7xlwifi Wi-Fi bring-up (package/T970WifiProbe.cpp, t970-wifi=<stage>).
 extern volatile uint32_t t970_wifi_stats[28] __attribute__((weak_import));
 extern char t970_wifi_cmddb[640] __attribute__((weak_import));
-extern volatile int32_t t970_wifi_rail_rc[8] __attribute__((weak_import));
+extern volatile int32_t t970_wifi_rail_rc[12] __attribute__((weak_import));
 extern volatile uint32_t t970_qud_inherited[24] __attribute__((weak_import));
 extern volatile uint32_t t970_wifi_smmu[10] __attribute__((weak_import));
 extern volatile uint32_t t970_wifi_mhi[13] __attribute__((weak_import));
@@ -209,6 +248,14 @@ extern volatile int32_t t970_qud_retry[8] __attribute__((weak_import));
 // T970WifiProbe.cpp MAX77705 MUIC USB switch: step, hw/fw rev, status1/2/bc, CONTROL1 before/after, nacks, cc status, uic int.
 extern volatile int32_t t970_muic[8] __attribute__((weak_import));
 extern volatile uint32_t t970_wifi_dom[14] __attribute__((weak_import));
+extern volatile uint32_t t970_wifi_trace[27] __attribute__((weak_import));
+extern volatile uint32_t t970_wifi_rst[9] __attribute__((weak_import));
+extern volatile uint32_t t970_wifi_chk[18] __attribute__((weak_import));
+extern volatile uint32_t t970_wifi_pbl[26] __attribute__((weak_import));
+extern volatile uint32_t t970_wifi_msi[10] __attribute__((weak_import));
+extern volatile uint32_t t970_wifi_stack[16] __attribute__((weak_import));   // T970WifiStack.cpp, stage 6
+extern volatile uint32_t nw_wifi_wr_n __attribute__((weak_import));          // T970Ath11k.c write trace (stage 5 and 6)
+extern volatile uint32_t nw_wifi_wr[512][3] __attribute__((weak_import));
 extern volatile uint32_t t970_qud_faults[16] __attribute__((weak_import));
 extern volatile int32_t t970_qud_phy[15] __attribute__((weak_import));
 extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
@@ -841,8 +888,9 @@ static size_t compose(char *out, size_t cap, uint32_t slot, unsigned now) {
              w[3], w[4], w[6], w[7], w[10], w[11], w[8], w[9], w[12], w[13], w[14]);
     at = put(out, at, cap, row, sizeof row);
     if (&t970_wifi_rail_rc) {
-      snprintf(row, sizeof row, "[t970 wifi rails] smpa4 %d smpa6 %d smpa5 %d smpc8 %d ldoc5 %d", (int)t970_wifi_rail_rc[0], (int)t970_wifi_rail_rc[1],
-               (int)t970_wifi_rail_rc[2], (int)t970_wifi_rail_rc[3], (int)t970_wifi_rail_rc[4]);
+      snprintf(row, sizeof row, "[t970 wifi rails] smpa4 %d smpa6 %d smpa5 %d smpc8 %d ldoc5 %d | rfclka1 %d rfclka3 %d lnbclka2 %d lnbclka3 %d",
+               (int)t970_wifi_rail_rc[0], (int)t970_wifi_rail_rc[1], (int)t970_wifi_rail_rc[2], (int)t970_wifi_rail_rc[3], (int)t970_wifi_rail_rc[4],
+               (int)t970_wifi_rail_rc[8], (int)t970_wifi_rail_rc[9], (int)t970_wifi_rail_rc[10], (int)t970_wifi_rail_rc[11]);
       at = put(out, at, cap, row, sizeof row);
     }
     if (&t970_wifi_cmddb && t970_wifi_cmddb[0]) {
@@ -872,6 +920,97 @@ static size_t compose(char *out, size_t cap, uint32_t slot, unsigned now) {
     char row[260];
     snprintf(row, sizeof row, "[t970 wifi dom] rc %d cr0 %x idr1 %x had %x cb/smr/asid %x tables %x:%08x fsr %x -> %x far %x:%08x fsynr %x | bank %u at %x",
              (int)w[0], w[1], w[2], w[3], w[4], w[6], w[5], w[7], w[8], w[10], w[9], w[11], w[12], w[13]);
+    at = put(out, at, cap, row, sizeof row);
+  }
+  if (&t970_wifi_rst && t970_wifi_rst[8]) {
+    const volatile uint32_t *r = t970_wifi_rst;
+    char row[200];
+    snprintf(row, sizeof row, "[t970 wifi rst] ltssm %x hotrst %x l1ss %x cookie %x warm %x cause %x greset %x mhistatus %x", r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]);
+    at = put(out, at, cap, row, sizeof row);
+  }
+  if (&t970_wifi_chk && (t970_wifi_chk[3] || t970_wifi_chk[4])) {
+    const volatile uint32_t *c = t970_wifi_chk;
+    char row[320];
+    snprintf(row, sizeof row, "[t970 wifi chk] differ %u first %u still %u of %u | bhi %x err %x dbg %x %x %x at %ums | gfsr %x>%x syn %x %x %x | soc %x smr %x fsr %x", c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9], c[10], c[11], c[12], c[13], c[14], c[15], c[16], c[17]);
+    at = put(out, at, cap, row, sizeof row);
+  }
+  if (&t970_wifi_msi && (t970_wifi_msi[3] || t970_wifi_msi[0])) {
+    const volatile uint32_t *q = t970_wifi_msi;
+    char row[200];
+    snprintf(row, sizeof row, "[t970 wifi msi] lnkctl %x msi %x addr %x set/mair %x | sink %x %x %x %x nonzero %u first %u", q[0], q[1], q[2], q[3], q[4], q[5], q[6], q[7], q[8], q[9]);
+    at = put(out, at, cap, row, sizeof row);
+  }
+  if (&t970_wifi_stack && t970_wifi_stack[0]) {   // stage 6 (T970WifiStack.cpp): [0] checkpoint, layout there
+    const volatile uint32_t *q = t970_wifi_stack;
+    char row[220];
+    snprintf(row, sizeof row, "[t970 wifi stack] cp %x nw %x cb/smr/asid %x mib/mair %x dma %uK peak %uK fail %u msi %u vec %x att %d frames %u err %d fsr %x far %x wait %u rounds %u",
+             q[0], q[1], q[2], q[3], q[4], q[5], q[6], q[7], q[8], (int)q[9], q[10], (int)q[11], q[12], q[13], q[14], q[15]);
+    at = put(out, at, cap, row, sizeof row);
+    // the driver's own messages (ath11k, MHI, QMI via T970WifiStack's pLog): sheng's block below prints them only under its
+    // native_wifi_stats, which stays 0 here. Per slot: the stack's counters, then up to 40 new notices (level <= 6) and up to 20
+    // new lines of the full ring.
+    if (&nw_wifi_stats && &native_wifi_text_n) {
+      snprintf(row, sizeof row, "[wifi-nw] stage=%u scans=%u frames=%u beacons=%u networks=%u err=%d lines=%u notes=%u", nw_wifi_stats.stage,
+               nw_wifi_stats.scans, nw_wifi_stats.frames, nw_wifi_stats.beacons, nw_wifi_stats.bss_seen, nw_wifi_stats.last_err,
+               native_wifi_text_n, &native_wifi_note_n ? native_wifi_note_n : 0);
+      at = put(out, at, cap, row, sizeof row);
+      if (&nw_wifi_where) {
+        snprintf(row, sizeof row, "[wifi-where] kind=%llu fn=%llx depth=%llu ms=%llu", (unsigned long long)nw_wifi_where[0],
+                 (unsigned long long)nw_wifi_where[1], (unsigned long long)nw_wifi_where[2], (unsigned long long)nw_wifi_where[3]);
+        at = put(out, at, cap, row, sizeof row);
+      }
+    }
+    if (&native_wifi_note && &native_wifi_note_n) {
+      static uint32_t noted6;
+      const uint32_t m = native_wifi_note_n;
+      uint32_t j = noted6;
+      if (m - j > 128) j = m - 128;
+      for (uint32_t k = 0; j < m && k < 40; ++j, ++k) {
+        char line[124];
+        snprintf(line, sizeof line, "[wifi-msg] %.110s", native_wifi_note[j % 128]);
+        at = put(out, at, cap, line, sizeof line);
+      }
+      noted6 = j;
+    }
+    if (&native_wifi_text && &native_wifi_text_n) {
+      static uint32_t shown6;
+      const uint32_t n = native_wifi_text_n;
+      uint32_t i = shown6;
+      if (n - i > 20) i = n - 20;   // only the newest 20 of the full ring: the notices above carry the rest
+      for (; i < n; ++i) {
+        char line[124];
+        snprintf(line, sizeof line, "[wifi-log] %.110s", native_wifi_text[i % 512]);
+        at = put(out, at, cap, line, sizeof line);
+      }
+      shown6 = i;
+    }
+  }
+  // [wifi-wr] first: index, then offset=value@microseconds, 6 per row (c<size>:<offset> for config writes); new ones only, 16 rows per slot
+  if (&nw_wifi_wr_n && &nw_wifi_wr && nw_wifi_wr_n) {
+    static uint32_t wrShown;
+    const uint32_t n = nw_wifi_wr_n < 512 ? nw_wifi_wr_n : 512;
+    for (unsigned rows = 0; wrShown < n && rows < 16; ++rows) {
+      char row[240];
+      int o = snprintf(row, sizeof row, "[wifi-wr] %u:", wrShown);
+      for (unsigned k = 0; k < 6 && wrShown < n && o < (int)sizeof row - 38; ++k, ++wrShown) {
+        const uint32_t off = nw_wifi_wr[wrShown][0], v = nw_wifi_wr[wrShown][1], us = nw_wifi_wr[wrShown][2];
+        o += (off & 0x80000000u) ? snprintf(row + o, sizeof row - o, " c%u:%x=%x@%u", (off >> 24) & 15, off & 0xffffff, v, us)
+                                 : snprintf(row + o, sizeof row - o, " %x=%x@%u", off, v, us);
+      }
+      at = put(out, at, cap, row, sizeof row);
+    }
+  }
+  if (&t970_wifi_pbl && t970_wifi_pbl[25]) {
+    const volatile uint32_t *q = t970_wifi_pbl;
+    char row[300];
+    int n = snprintf(row, sizeof row, "[t970 wifi pbl] log %x cfg %x boot %x dbg2 %x qfprom %x | sram", q[0], q[1], q[2], q[3], q[4]);
+    for (unsigned k = 5; k < 25 && n > 0 && (size_t)n < sizeof row; ++k) n += snprintf(row + n, sizeof row - n, " %x", q[k]);
+    at = put(out, at, cap, row, sizeof row);
+  }
+  if (&t970_wifi_trace && t970_wifi_trace[26]) {
+    char row[300];
+    int n = snprintf(row, sizeof row, "[t970 wifi trace]");
+    for (unsigned k = 0; k < t970_wifi_trace[26] && k < 26 && n > 0 && (size_t)n < sizeof row; ++k) n += snprintf(row + n, sizeof row - n, " %x", t970_wifi_trace[k]);
     at = put(out, at, cap, row, sizeof row);
   }
   if (&t970_wifi_mhi && t970_wifi_mhi[0]) {
@@ -1317,6 +1456,121 @@ static size_t compose(char *out, size_t cap, uint32_t slot, unsigned now) {
       at = put(out, at, cap, row, sizeof row);
     }
   }
+  // Audio stage A2 (T970Audio.cpp, t970-audio=1): stage, error, APR in/out, last opcode, core state, framework version, ms to
+  // channel up / to the tone, COPP, map handle, periods sent/returned/failed, stray answers; then the DSP command statuses (99 not
+  // sent), the SMMU stream route, the four amplifiers (DEVID, REVID|OTPID<<8|step<<16, IRQ1_STATUS1 after power-up, IRQ1_STATUS3
+  // while playing) and the I2C counters.
+  if (&t970_audio_stats && t970_audio_stats[0]) {
+    const volatile int32_t *s = t970_audio_stats;
+    char row[240];
+    snprintf(row, sizeof row, "[audio] st=%d err=%d rx=%d tx=%d op=%x core=%d fwk=%x/%x up=%dms tone=%dms copp=%d map=%x per=%d/%d bad=%d stray=%d",
+             s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], s[10], s[11], s[12], s[13], s[14], s[15]);
+    at = put(out, at, cap, row, sizeof row);
+    if (&t970_audio_cmd) {
+      const volatile int32_t *c = t970_audio_cmd;
+      snprintf(row, sizeof row, "[audio cmd] vote=%d/%d clk=%d grp=%d/%d tdm=%d slot=%d start=%d adm=%d mtx=%d asm=%d fmt=%d map=%d run=%d close=%d stop=%d",
+               c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9], c[10], c[11], c[12], c[13], c[14], c[15]);
+      at = put(out, at, cap, row, sizeof row);
+    }
+    if (&t970_audio_dma && &t970_audio_amp && &t970_audio_i2c) {
+      const volatile uint32_t *d = t970_audio_dma;
+      snprintf(row, sizeof row, "[audio dma] route=%x cr0=%x id1=%x smr=%x s2cr=%x cbar=%x sctlr=%x fsr=%x i2c nack=%u scl=%u fail=%u",
+               d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], t970_audio_i2c[0], t970_audio_i2c[1], t970_audio_i2c[2]);
+      at = put(out, at, cap, row, sizeof row);
+      int n = snprintf(row, sizeof row, "[audio amp]");
+      for (int i = 0; i < 4 && n < (int)sizeof row; ++i)
+        n += snprintf(row + n, sizeof row - n, " %x/%x/%x/%x", t970_audio_amp[i][0], t970_audio_amp[i][1], t970_audio_amp[i][2],
+                      t970_audio_amp[i][3]);
+      at = put(out, at, cap, row, sizeof row);
+    }
+    // Every DSP command in order as opcode:status (status byte; c4 no answer, c3 not sent), two rows of 12; then the amplifiers'
+    // IRQ1_STATUS1/IRQ1_STATUS3 right after the AFE port start and 100 ms later.
+    if (&t970_audio_trace && t970_audio_trace[0]) {
+      const unsigned count = t970_audio_trace[0] < 24 ? t970_audio_trace[0] : 24;
+      for (unsigned half = 0; half * 12 < count; ++half) {
+        int n = snprintf(row, sizeof row, "[audio trace%u]", half);
+        for (unsigned i = half * 12; i < count && i < half * 12 + 12 && n < (int)sizeof row; ++i)
+          n += snprintf(row + n, sizeof row - n, " %x:%x", t970_audio_trace[1 + i] >> 8, t970_audio_trace[1 + i] & 0xff);
+        at = put(out, at, cap, row, sizeof row);
+      }
+    }
+    // Device mode (t970-audio bit 32, st=20 serving): the service (published, opens, closes, requests, refused, memory maps), the
+    // stream (starts/stops/failed starts, periods sent/returned/failed, late, lead, peak, resyncs, settled lead, last failed start)
+    // and the plug-in (loads, unknown properties, volume x1000, volume sets, mix peak, writes, frames, gaps, overlaps, host clock Hz
+    // and result, IO thread priority; host clock step/value from the service).
+    if (&t970_audio_stream && &t970_audio_hal && &t970_audio_service && (t970_audio_service[0] || t970_audio_stream[0])) {
+      const volatile uint32_t *m = t970_audio_stream, *h = t970_audio_hal;
+      const volatile int32_t *v = t970_audio_service;
+      snprintf(row, sizeof row, "[audio svc] pub=%d open=%d close=%d req=%d refused=%d maps=%d start=%u/%u/%u per=%u/%u/%u late=%u lead=%u peak=%u sync=%u base=%d fail=%x",
+               v[0], v[1], v[2], v[3], v[4], v[5], m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], (int)m[10], m[11]);
+      at = put(out, at, cap, row, sizeof row);
+      snprintf(row, sizeof row, "[audio lvl] near-clip=%u run-peak=%u status-reads=%u drift-max=%u (amp IRQ1_STATUS1..4 in [audio clk])", m[12], m[13], m[14], m[15]);
+      at = put(out, at, cap, row, sizeof row);
+      if (&t970_audio_timing) {
+        const volatile int32_t *t = t970_audio_timing;
+        snprintf(row, sizeof row, "[audio timing] ahead=%d..%d notyet=%d lost-starts=%d runs=%d settled=%d test=%d resyncs=%u holes=%d",
+                 t[0], t[1], t[2], t[3], t[4], t[5], t[6], m[9], t[7]);
+        at = put(out, at, cap, row, sizeof row);
+        // The plug-in's volume: last set kind (1 scalar, 2 dB) / raw x1000 / element, applied gain x10000 now, least..most during IO,
+        // sets, then the last 8 sets as kind:raw x1000 (oldest slot first in ring order).
+        if (&t970_audio_vol) {
+          const volatile int32_t *q = t970_audio_vol;
+          int n = snprintf(row, sizeof row, "[audio vol] last=%d:%d el=%d gain=%d (%d..%d) sets=%d amp=%x hist", q[0], q[1], q[2], q[3], q[4], q[5], q[6], (unsigned)q[7]);
+          for (int k = 0; k < 8 && n < (int)sizeof row; ++k)
+            if (q[8 + k]) n += snprintf(row + n, sizeof row - n, " %u:%d", (unsigned)q[8 + k] >> 30, (int)((unsigned)q[8 + k] & 0x3fffffff) - (1 << 29));
+          at = put(out, at, cap, row, sizeof row);
+        }
+        // Every sample copied to the DSP: peak per slot FL/FR/RL/RR, big neighbour steps per slot, XOR of the words, frames, nonzero frames.
+        if (&t970_audio_bytes) {
+          const volatile uint32_t *b = t970_audio_bytes;
+          snprintf(row, sizeof row, "[audio bytes] peak=%u/%u/%u/%u jumps=%u/%u/%u/%u xor=%08x frames=%u nonzero=%u tw=%08x",
+                   b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11]);
+          at = put(out, at, cap, row, sizeof row);
+        }
+        // Amplifier 0x41's boost registers as found (VCTRL1 VCTRL2 COEFF SLOPE PEAK CLASSH WKFET NG), then VCTRL1 VCTRL2 PWR_CTRL2 as set.
+        if (&t970_audio_bst) {
+          const volatile uint32_t *s = t970_audio_bst;
+          snprintf(row, sizeof row, "[audio bst] %x %x %x %x %x %x %x %x set %x %x %x", s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7],
+                   s[8], s[9], s[10]);
+          at = put(out, at, cap, row, sizeof row);
+        }
+        // The A/B cycle (t970-audio bit 524288; 1048576 the format cycle, seg 0x11..0x16): segment now, changes, ms since the cycle
+        // began at the last change, failures.
+        if (&t970_audio_ab && t970_audio_ab[1]) {
+          snprintf(row, sizeof row, "[audio ab] seg=%x changes=%u at=%ums fail=%u", t970_audio_ab[0], t970_audio_ab[1], t970_audio_ab[2], t970_audio_ab[3]);
+          at = put(out, at, cap, row, sizeof row);
+        }
+        // The capture (t970-audio bit 262144): 256 frames L,R as signed 16-bit hex, 16 frames per row; P = the plug-in's raw mix,
+        // K = the same timeline frames as the service took them from the ring.
+        if (&t970_audio_cap && t970_audio_cap[2]) {
+          const volatile uint32_t *c = t970_audio_cap;
+          snprintf(row, sizeof row, "[audio cap] t=%u write=%u at=%u peak=%u k=%u found=%d wrote-ahead=%d hal-ahead=%d..%d", c[0], c[1] >> 16,
+                   c[1] & 0xffff, c[2], c[3], (int)c[4], (int)c[5], (int)c[6], (int)c[7]);
+          at = put(out, at, cap, row, sizeof row);
+          for (unsigned side = 0; side < 2; ++side) {
+            const volatile int16_t *v = side ? t970_audio_cap_k : t970_audio_cap_p;
+            for (unsigned r = 0; r < 16; ++r) {
+              int n = snprintf(row, sizeof row, "%c%02u", side ? 'K' : 'P', r);
+              for (unsigned k = 0; k < 32 && n < (int)sizeof row; ++k) n += snprintf(row + n, sizeof row - n, " %04x", (unsigned)(uint16_t)v[32 * r + k]);
+              at = put(out, at, cap, row, sizeof row);
+            }
+          }
+        }
+      }
+      snprintf(row, sizeof row, "[audio hal] mount=%d/%d loads=%u unk=%u vol=%u sets=%u peak=%u writes=%u frames=%u gaps=%u overlap=%u clock=%u/%d pri=%d clkstep=%llu",
+               &native_gpu_addon4_stage ? native_gpu_addon4_stage : -99, &native_gpu_addon4_status ? native_gpu_addon4_status : -99,
+               h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7], h[8], h[9], (int)h[10], (int)h[11],
+               &t970_audio_clock ? (unsigned long long)t970_audio_clock[0] : 99ULL);
+      at = put(out, at, cap, row, sizeof row);
+    }
+    if (&t970_audio_clk) {
+      int n = snprintf(row, sizeof row, "[audio clk]");
+      for (int i = 0; i < 4 && n < (int)sizeof row; ++i)
+        n += snprintf(row + n, sizeof row - n, " %x/%x/%x/%x", t970_audio_clk[i][0], t970_audio_clk[i][1], t970_audio_clk[i][2],
+                      t970_audio_clk[i][3]);
+      at = put(out, at, cap, row, sizeof row);
+    }
+  }
   // Battery power source (ShengBattery.cpp): stage, percent, mV, mA, temperature (raw), flags (present, external, charging, full,
   // notifications on), refresh cycles, answers, timeouts|errors<<16, notifications, USB type, full/design mAh, cycles, dropped|ignored<<16,
   // send refusals.
@@ -1327,6 +1581,108 @@ static size_t compose(char *out, size_t cap, uint32_t slot, unsigned now) {
              (int)b[0], (int)b[1] / 10, (int)b[1] % 10, (int)b[2], (int)b[3], (int)b[4] / 10, (int)(b[4] < 0 ? -b[4] : b[4]) % 10, (unsigned)b[5],
              (int)b[6], (int)b[7], (int)b[8], (int)b[9], (int)b[10], (unsigned)b[11], (int)b[12]);
     at = put(out, at, cap, row, sizeof row);
+  }
+  if (&t970_bt && t970_bt[0]) {
+    const volatile int32_t *b = t970_bt;
+    char row[400];
+    snprintf(row, sizeof row, "[t970 bt] st %d err %d fwrev %x qup %x cbcr %x pins %x smmu %x pa %x loop %x baud %d prod %x soc %x rom/patch %x "
+             "tx %d rx %d cmd %d to %d tlv %x hw %x dma %x lerr %x irq %x/%x/%x en %d hci %x lmp %x mfr %x rails %x reset %x rcg %x t %d",
+             (int)b[0], (int)b[1], (unsigned)b[2], (unsigned)b[3], (unsigned)b[4], (unsigned)b[5], (unsigned)b[6], (unsigned)b[7],
+             (unsigned)b[8], (int)b[9], (unsigned)b[10], (unsigned)b[11], (unsigned)b[12], (int)b[13], (int)b[14], (int)b[15], (int)b[16],
+             (unsigned)b[17], (unsigned)b[18], (unsigned)b[19], (unsigned)b[20], (unsigned)b[21], (unsigned)b[22], (unsigned)b[23],
+             (int)b[24], (unsigned)b[25], (unsigned)b[26], (unsigned)b[27], (unsigned)b[28], (unsigned)b[29], (unsigned)b[30], (int)b[31]);
+    at = put(out, at, cap, row, sizeof row);
+    if (&t970_bt_cp) {
+      // last MMIO checkpoint: block (1 SE6, 2 SMMU, 3 GCC, 4 TLMM gpio<<12|reg, 5 QUP0, 6 rail, 7 phase) << 28 | offset
+      char cprow[96];
+      snprintf(cprow, sizeof cprow, "[t970 bt cp] %x n %u t %u", (unsigned)t970_bt_cp[0], (unsigned)t970_bt_cp[1], (unsigned)t970_bt_cp[2]);
+      at = put(out, at, cap, cprow, sizeof cprow);
+    }
+    if (&t970_bt_text && t970_bt_text[0]) {
+      // the start-up lines in 200-byte rows
+      char text[204];
+      for (unsigned o = 0; o < sizeof t970_bt_text && t970_bt_text[o]; o += 200) {
+        unsigned n = 0;
+        while (n < 200 && o + n < sizeof t970_bt_text && t970_bt_text[o + n]) n++;
+        snprintf(text, sizeof text, "[t970 bt log] %.*s", (int)n, t970_bt_text + o);
+        at = put(out, at, cap, text, sizeof text);
+      }
+    }
+  }
+  // Sensors (package/T970Sensors.cpp, t970-sensors): SLPI bring-up and QRTR state, the services the hub announced, the latest
+  // accelerometer sample (mg in iPadOS axes, then mm/s^2 raw) and the HID device's counters (started, sent, refused, last result).
+  if (&t970_sensors && (t970_sensors[0] || (&native_hid_accel_status && native_hid_accel_status))) {
+    const volatile int32_t *s = t970_sensors;
+    char row[220];
+    snprintf(row, sizeof row, "[sensors] st=%d err=%d irq=%d slave=%x items=%x qmp=%d fw=%dK rdy=%dms rx=%d tx=%d ch=%x unk=%d qrtr=%d node=%x sns=%x req=%x",
+             (int)s[0], (int)s[1], (int)s[2], (unsigned)s[3], (unsigned)s[4], (int)s[5], (int)s[6], (int)s[7], (int)s[8], (int)s[9],
+             (unsigned)s[10], (int)s[11], (int)s[12], (unsigned)s[13], (unsigned)s[14], (unsigned)s[15]);
+    at = put(out, at, cap, row, sizeof row);
+    const volatile int32_t *a = t970_accel;
+    const volatile uint32_t *v = t970_sensors_srv;
+    snprintf(row, sizeof row, "[sensors accel] n=%d mg=%d,%d,%d raw=%d,%d,%d st=%x srv=%x %x %x %x %x %x %x %x",
+             (int)a[0], (int)a[1], (int)a[2], (int)a[3], (int)a[4], (int)a[5], (int)a[6], (unsigned)a[7],
+             v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7]);
+    at = put(out, at, cap, row, sizeof row);
+    // HID devices: status (1 started, 2 refused) / started / sent / refused / dropped (no event driver yet) / last result, for the
+    // accelerometer and the device orientation device; then the orientation state (bit index, changes, sink calls, ms of last change).
+    const volatile uint32_t *ha = &native_accel_hid ? native_accel_hid : NULL, *ho = &native_orient_hid ? native_orient_hid : NULL;
+    snprintf(row, sizeof row, "[sensors hid] accel=%u/%u/%u/%u/%u/%x orient=%u/%u/%u/%u/%u/%x now=%d changes=%d sent=%d at=%dms",
+             &native_hid_accel_status ? native_hid_accel_status : 0, ha ? ha[0] : 0, ha ? ha[1] : 0, ha ? ha[2] : 0, ha ? ha[3] : 0,
+             ha ? ha[4] : 0, &native_hid_orient_status ? native_hid_orient_status : 0, ho ? ho[0] : 0, ho ? ho[1] : 0, ho ? ho[2] : 0,
+             ho ? ho[3] : 0, ho ? ho[4] : 0, &t970_orient ? (int)t970_orient[0] : 0, &t970_orient ? (int)t970_orient[1] : 0,
+             &t970_orient ? (int)t970_orient[2] : 0, &t970_orient ? (int)t970_orient[3] : 0);
+    at = put(out, at, cap, row, sizeof row);
+    const volatile uint32_t *hg = &native_gyro_hid ? native_gyro_hid : NULL;
+    snprintf(row, sizeof row, "[sensors hid] gyro=%u/%u/%u/%u/%u/%x", &native_hid_gyro_status ? native_hid_gyro_status : 0,
+             hg ? hg[0] : 0, hg ? hg[1] : 0, hg ? hg[2] : 0, hg ? hg[3] : 0, hg ? hg[4] : 0);
+    at = put(out, at, cap, row, sizeof row);
+    if (&t970_sensors_text && t970_sensors_text[0]) {
+      snprintf(row, sizeof row, "[sensors] %.95s", t970_sensors_text);
+      at = put(out, at, cap, row, sizeof row);
+    }
+  }
+  if (&t970_haptics && t970_haptics[0]) {
+    const volatile int32_t *h = t970_haptics;
+    char row[120];
+    snprintf(row, sizeof row, "[t970 haptics] st %d rc %d n %d ms %d fail %d test %d refused %d off %d",
+             (int)h[0], (int)h[1], (int)h[2], (int)h[3], (int)h[4], (int)h[5], (int)h[6], (int)h[7]);
+    at = put(out, at, cap, row, sizeof row);
+  }
+  // Camera stage C1 (package/T970Camera.cpp): stage, detail, GDSCR, CCI version, chip ID words front/rear/wide, last CCI IRQ, ms;
+  // C2a stream test words front/rear/wide (count1 | count2 << 8 | mode << 16 | rc << 24).
+  if (&t970_camera && t970_camera[0]) {
+    const volatile int32_t *c = t970_camera;
+    char row[240];
+    snprintf(row, sizeof row, "[t970 camera] st %d det %x gdsc %x cci %x front %x rear %x wide %x irq %x ms %d sf %x sr %x sw %x",
+             (int)c[0], (unsigned)c[1], (unsigned)c[2], (unsigned)c[3], (unsigned)c[4], (unsigned)c[5], (unsigned)c[6],
+             (unsigned)c[7], (int)c[8], (unsigned)c[9], (unsigned)c[10], (unsigned)c[11]);
+    at = put(out, at, cap, row, sizeof row);
+    if (c[16]) {   // C3a: CSIPHY 3 + CSID-lite0 receive test on the front sensor (t970-camera bit 32)
+      snprintf(row, sizeof row, "[t970 camera c3] st %d fmt %x out %x len %x rate %d pll %x rx %x pkts %d ecc %x crc %d long %x short %x csid %x cfg %x ref %x phy %x",
+               (int)c[16], (unsigned)c[12], (unsigned)c[13], (unsigned)c[14], (int)c[15], (unsigned)c[17], (unsigned)c[18], (int)c[19],
+               (unsigned)c[20], (int)c[21], (unsigned)c[22], (unsigned)c[23], (unsigned)c[24], (unsigned)c[25], (unsigned)c[26],
+               (unsigned)c[27]);
+      at = put(out, at, cap, row, sizeof row);
+    }
+    if (c[28]) {   // C4: one frame through CSID-lite0 RDI0 and IFE-lite0 into the carve-out (t970-camera bit 64)
+      snprintf(row, sizeof row, "[t970 camera c4] st %d route %x ife %x top|bus %x rdi %x measure %x written %d stats %x ms %d pa %x000 stride %d fault %x",
+               (int)c[28], (unsigned)c[29], (unsigned)c[30], (unsigned)c[31], (unsigned)c[32], (unsigned)c[33], (int)c[34],
+               (unsigned)c[35], (int)c[36], (unsigned)c[37], (int)c[38], (unsigned)c[39]);
+      at = put(out, at, cap, row, sizeof row);
+    }
+    if (c[28] >= 6 && &t970_camera_thumb) {   // the 64x48 thumbnail, one row of 128 hex digits per line (tools/camera-thumb.py)
+      static const char hex[] = "0123456789abcdef";
+      for (unsigned ty = 0; ty < 48; ++ty) {
+        int n = snprintf(row, sizeof row, "[t970 camera thumb %02u] ", ty);
+        for (unsigned tx = 0; tx < 64 && n + 2 < (int)sizeof row; ++tx) {
+          const uint8_t v = t970_camera_thumb[ty * 64 + tx];
+          row[n++] = hex[v >> 4]; row[n++] = hex[v & 15];
+        }
+        row[n] = 0;
+        at = put(out, at, cap, row, sizeof row);
+      }
+    }
   }
   if (&native_battery_stats && native_battery_stats[0]) {
     char row[200];

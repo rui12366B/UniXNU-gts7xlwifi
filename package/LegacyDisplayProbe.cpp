@@ -978,6 +978,26 @@ void native_legacy_display_late_probe(void) {
 	// periph14: the MAX77705 battery (package/T970Battery.cpp, t970-battery=1); it waits for IOBSD on its own thread.
 	extern void t970_battery_start(void) __attribute__((weak_import));
 	if (&t970_battery_start) t970_battery_start();
+	// The vibration motor (package/T970Haptics.cpp, t970-haptics=<bits>: 1 service, 2 boot test pulse); its own thread.
+	extern void t970_haptics_start(void) __attribute__((weak_import));
+	if (&t970_haptics_start) t970_haptics_start();
+	// Camera stage C1: power one sensor and read its chip ID over the CCI (package/T970Camera.cpp, t970-camera=<bits>); own thread.
+	extern void t970_camera_start(void) __attribute__((weak_import));
+	if (&t970_camera_start) t970_camera_start();
+	// Audio stage A1: the audio DSP (package/T970Adsp.cpp, t970-adsp=1 survey, 2 start); it runs on its own thread.
+	extern void t970_adsp_start(void) __attribute__((weak_import));
+	if (&t970_adsp_start) t970_adsp_start();
+	// Audio stage A2: APR, AFE TDM, CS35L41 amplifiers and a boot test tone (package/T970Audio.cpp, t970-audio=1). After the ADSP
+	// start: it registers its GLINK channel before the DSP boots, then waits on its own thread.
+	extern void t970_audio_start(void) __attribute__((weak_import));
+	if (&t970_audio_start) t970_audio_start();
+	// Sensors: the SLPI sensor hub and the accelerometer for rotation (package/T970Sensors.cpp, t970-sensors=<bits>); own thread.
+	// After the ADSP start: with t970-adsp >= 2 it waits for the ADSP, which owns the doorbell interrupt and the AOP mailbox.
+	extern void t970_sensors_start(void) __attribute__((weak_import));
+	if (&t970_sensors_start) t970_sensors_start();
+	// Bluetooth: the QCA6390's Bluetooth side over QUP0 SE6 (package/T970Bluetooth.cpp, t970-bt=<bits>, off by default); own thread.
+	extern void t970_bluetooth_start(void) __attribute__((weak_import));
+	if (&t970_bluetooth_start) t970_bluetooth_start();
 
 	// The AppleKeyStore stand-in. Same reason as the HID publisher: a selected component that
 	// nothing references is dropped from a static link, and without it there is no keybag to

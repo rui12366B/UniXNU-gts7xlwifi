@@ -24,6 +24,15 @@
         reg = <0 0x80000000 0x2 0x00000000>;
     };
 
+    // The radio as wifid's launchd condition looks for it (/arm-io/wlan, as UniXNU-sheng exports its WCN7850). Disabled, so the ADT
+    // and the default boot stay as they are: launchd would otherwise start wifid with no interface behind it. A Wi-Fi payload
+    // (t970-wifi=6, package/T970WifiStack.cpp, which also fills local-mac-address at run time) sets it to "okay".
+    wlan {
+        compatible = "qcom,qca6390";
+        unixnu,adt-name = "wlan";
+        status = "okay";
+    };
+
     reserved-memory {
         #address-cells = <2>;
         #size-cells = <2>;

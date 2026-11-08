@@ -83,7 +83,14 @@ int sheng_boot_watchdog_policy(void *process, uint64_t scratch) {
  if(!enabled && !jobs[0] && !lite)return 0;
  policy[0]=0;strlcat(policy,policy_head,sizeof(policy));
  if(enabled)strlcat(policy,policy_watchdogd,sizeof(policy));
- if(lite)for(const char *c=lite_jobs;*c;) {if((error=append_job(&c)))return error;}
+ // gts7xlwifi t970-sensors bit 64: keep locationd out of the lite list. CoreMotion's device orientation (which backboardd follows:
+ // "Updating device orientation from CoreMotion") runs in locationd, which reads the accelerometer service (package/T970Sensors.cpp).
+ unsigned sensors=0;PE_parse_boot_argn("t970-sensors",&sensors,sizeof(sensors));
+ static const char keep_locationd[]="com.apple.locationd,";
+ if(lite)for(const char *c=lite_jobs;*c;) {
+  if((sensors&64) && !strncmp(c,keep_locationd,sizeof(keep_locationd)-1)){c+=sizeof(keep_locationd)-1;continue;}
+  if((error=append_job(&c)))return error;
+ }
  for(const char *c=jobs;*c;) {if((error=append_job(&c)))return error;}
  strlcat(policy,policy_tail,sizeof(policy));
  const char *directory="/private/var/db/com.apple.xpc.launchd";

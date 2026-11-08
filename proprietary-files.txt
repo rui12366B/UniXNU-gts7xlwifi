@@ -8,3 +8,9 @@
 .cache/firmware/gpu/a650_zap.b02 | firmware_mnt/image/a650_zap.b02 | a415e5452fa8f597670a6e51010e97bfabca7d20fbce8044caed64d9d5873113 | scripts/gen-gpu-firmware-a650.py
 .cache/firmware/wifi/qca6390/amss20.bin | /vendor/firmware/qca6390/amss20.bin | 5dcbc6497bf271966bfaa8df7d5f57de374f833e9069475107e9bc644e8e3af2 | GPU addon (T970WifiProbe stage 5)
 .cache/firmware/wifi/qca6390/m3.bin | /vendor/firmware/qca6390/m3.bin | 804777d787eb3089b437fdf186049ead0a0c27e3c46ef0df6ddb8a5c5280c13f | GPU addon (later Wi-Fi stages)
+.cache/firmware/wifi/qca6390/bdwlan.elf | /vendor/firmware/qca6390/bdwlan.elf | e7182e96ff5c219616c1c7042fa404e5118f3adc2991d00863736b57c0fd4885 | GPU addon (Wi-Fi stage 6: ath11k board file for QMI board ID 0xff)
+.cache/firmware/wifi/qca6390/bdwlan.e05 | /vendor/firmware/qca6390/bdwlan.e05 | e7182e96ff5c219616c1c7042fa404e5118f3adc2991d00863736b57c0fd4885 | GPU addon (Wi-Fi stage 6: board file for QMI board ID 5)
+.cache/firmware/wifi/qca6390/bdwlan.elf1 | /vendor/firmware/qca6390/bdwlan.elf1 | edf798e91afd1d597ab43ef6f3e0ec13e99b4b671071a8bd1dac3fc23df57db8 | not read yet (Samsung variant)
+.cache/firmware/wifi/qca6390/bdwlan.elf2 | /vendor/firmware/qca6390/bdwlan.elf2 | 0d56468f0712c1191f156356683b3fdf831ac3bac2e24a54cf010cd92c50da74 | not read yet (Samsung variant)
+.cache/firmware/wifi/qca6390/regdb.bin | /vendor/firmware/qca6390/regdb.bin | 964c361efc96db7b251d3f6355f5a933d969e71dd7a7565a685fbbfdafb8f83f | GPU addon (Wi-Fi stage 6, if ath11k asks for it)
+.cache/firmware/adsp/adsp.mbn | /vendor/firmware_mnt/image/adsp.mdt + adsp.b00..b20 (scripts/squash-mdt.py) | 7c613e3fa196ef87c9389f61578dbb6e2c110ff69057adf8733109b5682c1f6f | GPU addon firmware/adsp/adsp.mbn (audio stage A1, package/T970Adsp.cpp)

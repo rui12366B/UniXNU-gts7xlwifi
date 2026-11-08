@@ -48,6 +48,45 @@ static const unsigned char touchDescriptor[]={
     0x09,0x54,0x75,0x08,0x95,0x01,0x15,0x00,0x26,0xff,0x00,0x81,0x02,0xc0
 };
 #define TOUCH_FINGERS 10
+// gts7xlwifi: the motion sensors (package/T970Sensors.cpp) as two devices of their own, in the form the original IOHIDEventDriver
+// takes them. Its "HID SensorEvent Driver" personality (IOHIDFamily 2031, iPadOS 17) matches the Sensor page application collections
+// 0x20/0x73 (Accelerometer 3D) and 0x20/0x8a (Device Orientation), among others; nothing matches Apple vendor page 0xff00/3, which is
+// why the first version (combo1b) got no event driver and sent nothing.
+// Accelerometer (report 4): Data Field Acceleration Axis X/Y/Z (0x453-0x455), int16 in mg: logical = physical -32768..32767 with unit
+// exponent 0xd (-3), so getScaledFixedValue(kIOHIDValueScaleTypeExponent) in handleAccelReport gives g. The event driver turns each
+// report into an accelerometer event.
+static const unsigned char accelDescriptor[]={
+    0x05,0x20,0x09,0x73,0xa1,0x01,0x85,0x04,
+    0x0a,0x53,0x04,0x0a,0x54,0x04,0x0a,0x55,0x04,
+    0x16,0x00,0x80,0x26,0xff,0x7f,0x36,0x00,0x80,0x46,0xff,0x7f,0x55,0x0d,
+    0x75,0x10,0x95,0x03,0x81,0x02,0xc0
+};
+// Device orientation (report 5): the seven Apple motion orientation flags (page 0xff0c, usages 0x64 ambiguous, 0x65 portrait, 0x66
+// portrait upside down, 0x67 landscape left, 0x68 landscape right, 0x69 face up, 0x6a face down; the range parseDeviceOrientationElement
+// of the donor IOHIDEventDriver checks) as one bit each. handleDeviceOrientationReport sends an orientation event (CM usage type) for
+// a flag that went from 0 to 1.
+static const unsigned char orientDescriptor[]={
+    0x05,0x20,0x09,0x8a,0xa1,0x01,0x85,0x05,
+    0x06,0x0c,0xff,0x19,0x64,0x29,0x6a,0x15,0x00,0x25,0x01,0x75,0x01,0x95,0x07,0x81,0x02,
+    0x75,0x01,0x95,0x01,0x81,0x03,0xc0
+};
+// Gyro (report 6): Data Field Angular Velocity about X/Y/Z (0x457-0x459) in the Gyrometer collection (0x20/0x7a, which the same
+// personality matches), int16 in mrad/s with unit exponent -3, so handleGyroReport gives rad/s. locationd's orientation detector
+// (CLOrientationNotifier::startDetection) gives up with "No gyro; not detecting orientation!" on a model that has one, as the j120 does.
+static const unsigned char gyroDescriptor[]={
+    0x05,0x20,0x09,0x7a,0xa1,0x01,0x85,0x06,
+    0x0a,0x57,0x04,0x0a,0x58,0x04,0x0a,0x59,0x04,
+    0x16,0x00,0x80,0x26,0xff,0x7f,0x36,0x00,0x80,0x46,0xff,0x7f,0x55,0x0d,
+    0x75,0x10,0x95,0x03,0x81,0x02,0xc0
+};
+// The sensor driver hands each sample (iPadOS axes, mg) to the accel sink, x, y, z packed as three int16 in the low 48 bits, and each
+// orientation change (bit 0..6 = usage 0x64..0x6a) to the orientation sink.
+extern "C" void native_accel_set_sink(void (*)(void *, uint64_t), void *) __attribute__((weak_import));
+extern "C" void native_orient_set_sink(void (*)(void *, uint64_t), void *) __attribute__((weak_import));
+extern "C" void native_gyro_set_sink(void (*)(void *, uint64_t), void *) __attribute__((weak_import));   // mrad/s, packed as accel
+// [0] 1 started (2 accel: event driver found and stamped 0xff00/3), [1] reports sent, [2] refused, [3] dropped: no event driver
+// attached yet, [4] last result
+extern "C" {volatile uint32_t native_accel_hid[5], native_orient_hid[5], native_gyro_hid[5];}
 // Edge contacts (int-163). A contact that starts within ~3 mm of a panel edge carries kIOHIDDigitizerEventFromEdgeTip (0x800) in its
 // finger events' event mask for its whole life, as Apple's multitouch stack reports it (MultitouchHID). UIKit derives UITouch's edge
 // type from that bit alone (_UIEventHIDTouchEdgeTypeForHIDEvent: 0x800/0x1000/0x2000/0x40000 -> 1..4), and every screen-edge
@@ -132,6 +171,13 @@ class NativeHidInput : public IOHIDDevice {
     // The digitizer is a separate service from the keyboard: backboardd matches digitizers by primary usage page/usage
     // (Digitizer/Touch Screen) and the Built-In flag, which a combined keyboard-first descriptor would not provide.
     bool touchOnly=false;
+    bool accelOnly=false;
+    bool orientOnly=false;
+    bool gyroOnly=false;
+    // The orientation last asked for, and whether it reached an event driver: the drivers attach late (IOMatchDefer, ~47 s into
+    // combo2), so the state decided before then is sent once the driver is there.
+    uint64_t lastOrient=0;
+    bool orientDelivered=false;
     bool eventDriverFound=false;
     uint32_t lastSeq=0;
     // Fingers sent as down in the previous report; a vanished identifier gets one explicit tip-up report.
@@ -220,13 +266,64 @@ class NativeHidInput : public IOHIDDevice {
         native_hid_input_observed(4,result);
         return kIOReturnSuccess;
     }
+    // The sensor thread calls accelNotify for every sample; the report goes out from this device's work loop.
+    static void accelNotify(void *context,uint64_t packed) {
+        NativeHidInput *self=static_cast<NativeHidInput *>(context);
+        if(self && self->inputLoop)self->inputLoop->runAction(&NativeHidInput::accelAction,self,reinterpret_cast<void *>(uintptr_t(packed)));
+    }
+    static IOReturn accelAction(OSObject *owner,void *packed,void *,void *,void *) {
+        NativeHidInput *self=OSDynamicCast(NativeHidInput,owner);if(!self)return kIOReturnSuccess;
+        volatile uint32_t *stats=self->orientOnly?native_orient_hid:self->gyroOnly?native_gyro_hid:native_accel_hid;
+        const uint64_t v=uintptr_t(packed);
+        if(self->orientOnly){self->lastOrient=v;self->orientDelivered=false;}
+        if(!self->hasEventDriverCached()){stats[3]=stats[3]+1;return kIOReturnSuccess;}
+        unsigned char report[7]={static_cast<unsigned char>(self->orientOnly?5:self->gyroOnly?6:4)};
+        const unsigned length=self->orientOnly?2:7;
+        for(unsigned i=1;i<length;++i)report[i]=static_cast<unsigned char>(v>>(8*(i-1)));
+        IOBufferMemoryDescriptor *buffer=IOBufferMemoryDescriptor::withBytes(report,length,kIODirectionNone);
+        IOReturn result=buffer?self->handleReport(buffer,0,0):kIOReturnNoMemory;
+        OSSafeReleaseNULL(buffer);
+        native_hid_input_observed(7,result);
+        if(result==kIOReturnSuccess){stats[1]=stats[1]+1;if(self->orientOnly)self->orientDelivered=true;}else stats[2]=stats[2]+1;
+        stats[4]=(uint32_t)result;
+        return kIOReturnSuccess;
+    }
     bool hasEventDriverCached() {
         if(!eventDriverFound) {
             IORegistryEntry *driver=eventDriver(this,4);
             eventDriverFound=driver!=nullptr;
             if(driver && (touchEnabled || touchOnly))edge::install(driver);
+            if(driver && accelOnly)stampMotion(driver,3,0x73,native_accel_hid);
+            if(driver && gyroOnly)stampMotion(driver,9,0x7a,native_gyro_hid);
         }
         return eventDriverFound;
+    }
+    // The clients look the accelerometer up as the Apple SPU publishes it, not as the event driver matched it: backboardd's matcher
+    // is initWithUsagePage:0xff00 usage:3 builtIn:YES (BKAccelerometerInterface), locationd's CLAccelerometer service lookup is the
+    // pair {0xff00, 3}. IOHIDEventDriver only matches the Sensor page collection (0x20/0x73) and publishes that as its primary usage,
+    // so the driver and its interface are stamped with the SPU identity (the event system's conformsTo reads DeviceUsagePairs, then
+    // PrimaryUsagePage/PrimaryUsage), keeping 0x20/0x73 in the pairs as well. Same approach as native_hid_live_checkpoint for the
+    // digitizer. Once, when the driver is first seen.
+    // The gyro the same way: backboardd's gyro matcher is 0xff00/9 builtIn:YES, locationd's CLGyro looks up {0xff00, 9}.
+    static void stampMotion(IORegistryEntry *driver,unsigned appleUsage,unsigned sensorUsage,volatile uint32_t *stats) {
+        OSArray *pairs=OSArray::withCapacity(2);
+        const unsigned values[2][2]={{0xff00,appleUsage},{0x20,sensorUsage}};
+        for(unsigned i=0;pairs && i<2;++i) {
+            OSDictionary *pair=OSDictionary::withCapacity(2);
+            OSNumber *page=OSNumber::withNumber(values[i][0],32),*usage=OSNumber::withNumber(values[i][1],32);
+            if(pair && page && usage){pair->setObject("DeviceUsagePage",page);pair->setObject("DeviceUsage",usage);pairs->setObject(pair);}
+            OSSafeReleaseNULL(page);OSSafeReleaseNULL(usage);OSSafeReleaseNULL(pair);
+        }
+        IORegistryEntry *targets[2]={driver,driver->getParentEntry(gIOServicePlane)};
+        for(IORegistryEntry *t:targets) {
+            if(!t)continue;
+            t->setProperty("Built-In",kOSBooleanTrue);
+            t->setProperty("PrimaryUsagePage",(unsigned long long)0xff00,32);
+            t->setProperty("PrimaryUsage",(unsigned long long)appleUsage,32);
+            if(pairs)t->setProperty("DeviceUsagePairs",pairs);
+        }
+        OSSafeReleaseNULL(pairs);
+        stats[0]=2;   // 2: event driver found and stamped
     }
     static bool hasEventDriver(IORegistryEntry *parent,unsigned depth) {return eventDriver(parent,depth)!=nullptr;}
     // The IOHIDEventDriver below this device, if one has attached.
@@ -244,6 +341,11 @@ class NativeHidInput : public IOHIDDevice {
     }
     static void tick(OSObject *owner,IOTimerEventSource *source) {
         NativeHidInput *self=OSDynamicCast(NativeHidInput,owner);if(!self)return;
+        if(self->accelOnly||self->orientOnly||self->gyroOnly){
+            if(self->hasEventDriverCached() && self->orientOnly && self->lastOrient && !self->orientDelivered)
+                accelAction(self,reinterpret_cast<void *>(uintptr_t(self->lastOrient)),nullptr,nullptr,nullptr);
+            source->setTimeoutMS(1000);return;
+        }
         native_hid_live_checkpoint(self);
         if(self->touchOnly){source->setTimeoutMS(1000);return;}
         if(!self->down && !hasEventDriver(self,4)) {
@@ -265,13 +367,19 @@ class NativeHidInput : public IOHIDDevice {
     }
 public:
     void setTouchOnly() {touchOnly=true;}
+    void setAccelOnly() {accelOnly=true;}
+    void setOrientOnly() {orientOnly=true;}
+    void setGyroOnly() {gyroOnly=true;}
     IOWorkLoop *getWorkLoop() const override {return inputLoop;}
-    OSString *newTransportString() const override {return OSString::withCString(touchOnly?"SPI":"Virtual");}
-    OSString *newProductString() const override {return OSString::withCString(touchOnly?"Offline touch digitizer":"Offline HID input probe");}
+    OSString *newTransportString() const override {return OSString::withCString(touchOnly?"SPI":(accelOnly||orientOnly||gyroOnly)?"SPU":"Virtual");}
+    OSString *newProductString() const override {return OSString::withCString(touchOnly?"Offline touch digitizer":accelOnly?"Accelerometer":orientOnly?"Device orientation":gyroOnly?"Gyro":"Offline HID input probe");}
     IOReturn newReportDescriptor(IOMemoryDescriptor **out) const override {
         if(!out)return kIOReturnBadArgument;
         unsigned char combined[sizeof(descriptor)+sizeof(touchDescriptor)];
         size_t size;
+        if(accelOnly){*out=IOBufferMemoryDescriptor::withBytes(accelDescriptor,sizeof(accelDescriptor),kIODirectionNone);return *out?kIOReturnSuccess:kIOReturnNoMemory;}
+        if(gyroOnly){*out=IOBufferMemoryDescriptor::withBytes(gyroDescriptor,sizeof(gyroDescriptor),kIODirectionNone);return *out?kIOReturnSuccess:kIOReturnNoMemory;}
+        if(orientOnly){*out=IOBufferMemoryDescriptor::withBytes(orientDescriptor,sizeof(orientDescriptor),kIODirectionNone);return *out?kIOReturnSuccess:kIOReturnNoMemory;}
         if(touchOnly){size=sizeof(touchDescriptor);memcpy(combined,touchDescriptor,size);}
         else{
             size=sizeof(descriptor);memcpy(combined,descriptor,size);
@@ -293,6 +401,7 @@ public:
         // the keyboard and buttons and declares no second, dead Touch Screen the window server could bind to instead.
         unsigned split=0;
         if(!touchOnly && PE_parse_boot_argn("sheng-touch-split",&split,sizeof(split)) && split==1)touchEnabled=false;
+        if(accelOnly||orientOnly||gyroOnly)touchEnabled=false;
         // DigitizerCollectionDispatch: IOHIDEventDriver (setDigitizerProperties) reads it up the service plane and then sends each
         // report's fingers as one digitizer collection with a child per finger. Without it a touch screen gets one event per finger,
         // and backboardd takes each as the whole touch set, so no two fingers are ever down together for UIKit (no pinch, no
@@ -306,14 +415,20 @@ public:
         if(touchOnly||touchEnabled) {
             if(&native_touch_set_sink)native_touch_set_sink(&NativeHidInput::touchNotify,this);
         }
-        if(!touchOnly && &native_buttons_set_sink)native_buttons_set_sink(&NativeHidInput::buttonsNotify,this);
+        if(accelOnly){if(&native_accel_set_sink)native_accel_set_sink(&NativeHidInput::accelNotify,this);native_accel_hid[0]=1;}
+        else if(orientOnly){if(&native_orient_set_sink)native_orient_set_sink(&NativeHidInput::accelNotify,this);native_orient_hid[0]=1;}
+        else if(gyroOnly){if(&native_gyro_set_sink)native_gyro_set_sink(&NativeHidInput::accelNotify,this);native_gyro_hid[0]=1;}
+        else if(!touchOnly && &native_buttons_set_sink)native_buttons_set_sink(&NativeHidInput::buttonsNotify,this);
         setProperty("OfflineInputProbe",true);
         native_hid_input_observed(2,0);
         timer->setTimeoutMS(1000);return true;
     }
     void stop(IOService *provider) override {
         if((touchOnly||touchEnabled) && &native_touch_set_sink)native_touch_set_sink(nullptr,nullptr);
-        if(!touchOnly && &native_buttons_set_sink)native_buttons_set_sink(nullptr,nullptr);
+        if(accelOnly){if(&native_accel_set_sink)native_accel_set_sink(nullptr,nullptr);}
+        else if(orientOnly){if(&native_orient_set_sink)native_orient_set_sink(nullptr,nullptr);}
+        else if(gyroOnly){if(&native_gyro_set_sink)native_gyro_set_sink(nullptr,nullptr);}
+        else if(!touchOnly && &native_buttons_set_sink)native_buttons_set_sink(nullptr,nullptr);
         if(timer){timer->cancelTimeout();inputLoop->removeEventSource(timer);OSSafeReleaseNULL(timer);}
         IOHIDDevice::stop(provider);
     }
@@ -321,4 +436,7 @@ public:
 };
 OSDefineMetaClassAndStructors(NativeHidInput,IOHIDDevice)
 extern "C" IOService *native_hid_input_allocate(void) {return new NativeHidInput;}
+extern "C" IOService *native_hid_accel_allocate(void) {NativeHidInput *device=new NativeHidInput;if(device)device->setAccelOnly();return device;}
+extern "C" IOService *native_hid_gyro_allocate(void) {NativeHidInput *device=new NativeHidInput;if(device)device->setGyroOnly();return device;}
+extern "C" IOService *native_hid_orient_allocate(void) {NativeHidInput *device=new NativeHidInput;if(device)device->setOrientOnly();return device;}
 extern "C" IOService *native_hid_touch_allocate(void) {NativeHidInput *device=new NativeHidInput;if(device)device->setTouchOnly();return device;}

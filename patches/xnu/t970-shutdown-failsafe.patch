@@ -1,0 +1,23 @@
+--- a/bsd/kern/kern_shutdown.c
++++ b/bsd/kern/kern_shutdown.c
+@@ -85,6 +85,7 @@
+ static int  sd_closelog(vfs_context_t);
+ static void sd_log(vfs_context_t, const char *, ...);
+ static void proc_shutdown(int only_non_dext);
++extern void t970_shutdown_failsafe(int howto) __attribute__((weak_import));
+ static void zprint_panic_info(void);
+ extern void halt_log_enter(const char * what, const void * pc, uint64_t time);
+ 
+@@ -274,6 +275,12 @@
+ 		}
+ 
+ 		IOSystemShutdownNotification(howto, kIOSystemShutdownNotificationTerminateDEXTs);
++
++		/* gts7xlwifi: the writable volumes are unmounted here. periph15 then hung for minutes unmounting the sealed
++		 * OS volume and never reached PE_halt_restart; arm the platform's delayed power-off/restart (ShengPlatformPower.cpp). */
++		if (t970_shutdown_failsafe) {
++			t970_shutdown_failsafe(howto);
++		}
+ 
+ 		startTime = mach_absolute_time();
+ 		proc_shutdown(FALSE);

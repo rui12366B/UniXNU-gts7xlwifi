@@ -29,7 +29,9 @@ CONFIG_XNU_BOOT_PROGRESS=y
 CONFIG_XNU_BUILD_ARCHIVES=y
 # BootProgressStubs.c and LinkStubs.c: zero definitions of the weak diagnostics BootProgress.c
 # references for components this board does not select yet.
-CONFIG_XNU_EXTRA_LD_ARCHIVES="{tree}/build/link-stubs/libLinkStubs.a"
+# libT970Wifi.a (scripts/build-t970-wifi.py): the Wi-Fi stack, force-loaded because only weak imports of T970WifiProbe.cpp refer
+# to it; its strong definitions take the place of BootProgressStubs.c's weak zero rows (native_wifi_text, nw_wifi_stats).
+CONFIG_XNU_EXTRA_LD_ARCHIVES="{tree}/build/link-stubs/libLinkStubs.a -Wl,-force_load,{tree}/build/t970-wifi/libT970Wifi.a"
 # AMFI's ConfigurationSettings panics "AMFI: No PMGR?" without an ApplePMGR provider (measured
 # here 2026-10-31, panic screen). ShengPlatformPower (UniXNU-alioth/sheng package, MIT) publishes the
 # original PMGR nub with every power operation refused: no clock, rail or reset is touched.

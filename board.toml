@@ -50,6 +50,10 @@ archives = [
   "build-adreno650.py",
   # The CDC-ACM debug console over the DWC3 the bootloader leaves in DEVICE mode (drivers/QcomXnuUsbDebug).
   "build-qcom-usb-debug.py",
+  # Wi-Fi stage 6 (t970-wifi=6): Linux v7.0.14 ath11k (QCA6390 hw2.0) with mac80211/cfg80211, MHI, QMI and QRTR on the UniXNU
+  # Ath12kWifi module, plus package/T970WifiStack.cpp and T970WifiNet.cpp, into build/t970-wifi/libT970Wifi.a; force-loaded by
+  # configs/gts7xlwifi_defconfig. Nothing in it runs without the boot argument.
+  "build-t970-wifi.py",
   # Its own recipe output is archived by the display recipe above; listed because a selected component
   # needs an archive entry (alioth does the same).
   "component:ShengHidInput",
@@ -118,7 +122,7 @@ dram_size = "0x200000000"
 # refuses launchd's first exec.
 # The original two Apple modules, and (since the GPU) the owner bundle: one module with the NativeAdrenoMetal plugin, adrenoprobed and
 # Turnip CDHashes (UniXNU-fft scripts/make-owner-trust-bundle.py) followed by the same two modules byte for byte.
-trust_cache_sha256 = ["7416ca4f8377146626bb284e2133c76bee6cb4e3ee0af5d648b186235a7323a7", "fc39331d4cba48e06890dacf720dfd13ba6fab75e45c30243f42ec97c5ff4263"]
+trust_cache_sha256 = ["7416ca4f8377146626bb284e2133c76bee6cb4e3ee0af5d648b186235a7323a7", "fc39331d4cba48e06890dacf720dfd13ba6fab75e45c30243f42ec97c5ff4263", "b7c1de0a3b08853929112b554017924b4ac0efc35410a5147411cdcf7e68a12e", "1a94e84f95c3698a6eccb08870bbda4199dfe978dcb616d37d374a64c35cce34", "d13fbd6b547b9b83cb5923ca085a27df2aa9210d7559d826626d2c3feeda2021", "24b7bf159377cb220ee17463b3427951b94ea1ef5f3f566f31331893b61c8b08", "132b25f0a8145ce84dc9cf62a3f38f4c2ebf5e9683b88bf18a555dc771749093", "533159bd66cea7323de2544da7dbdaaf278cc024fc58b9faca131dacd4ff60a5", "88fa6e6c563a6b7cace58bc95649ef4b986cbb1ed39076a1cdc467b9c0612862", "199f5671204c9f15cb46ce50f09e5cf412ac17205243ebf7b5b8cefce2571f0a"]
 # Stage bars (kernel entry, MMU enable) and panic() drawn on the frame buffer
 # (scripts/patch-xnu-entry-probe.py): there is no serial console on this tablet.
 panic_screen = true

@@ -30,6 +30,9 @@ extern kmod_info_t g_kernel_kmod_info;
 extern "C" void native_hid_static_init(void) __asm__("__GLOBAL__sub_I_NativeHidInput.cpp");
 extern "C" IOService *native_hid_input_allocate(void);
 extern "C" IOService *native_hid_touch_allocate(void);
+extern "C" IOService *native_hid_accel_allocate(void);
+extern "C" IOService *native_hid_orient_allocate(void);
+extern "C" IOService *native_hid_gyro_allocate(void);
 extern "C" kern_return_t OSKextLoadKextWithIdentifier(const char *);
 extern "C" size_t qcom_usb_debug_write(const void *, size_t);
 
@@ -42,6 +45,9 @@ volatile uint32_t native_hid_class_sizes[5];
 volatile uint64_t native_hid_input_object, native_hid_touch_object;
 // 0 not asked for, 1 started, 2 the device refused to start.
 volatile uint32_t native_hid_touch_status;
+// gts7xlwifi accelerometer device (t970-sensors bit 16 or 32): 0 not asked for, 1 started, 2 refused to start.
+volatile uint32_t native_hid_accel_status, native_hid_orient_status, native_hid_gyro_status;
+volatile uint64_t native_hid_accel_object;
 volatile uintptr_t native_hid_props_driver;
 // The publisher's tick asks whether it should run. The touch core feeds it directly through
 // the sink, so nothing has to poll: answer yes once the board has asked for the digitizer.
@@ -136,6 +142,38 @@ extern "C" int native_hid_input_probe(void) {
       native_hid_touch_object = 0;
     }
     native_hid_touch_status = touchStarted ? 1 : 2;
+  }
+  // gts7xlwifi: a third IOHIDDevice for the accelerometer (package/T970Sensors.cpp feeds it). Its own service, so it publishes
+  // PrimaryUsagePage 0x20 / PrimaryUsage 0x73 (Accelerometer 3D) and carries no Built-In (native_hid_live_checkpoint leaves it alone).
+  unsigned sensors = 0;
+  if (PE_parse_boot_argn("t970-sensors", &sensors, sizeof sensors) && (sensors & 0x30)) {
+    IOService *accel = native_hid_accel_allocate();
+    native_hid_accel_object = (uintptr_t) accel;
+    bool accelStarted = accel && accel->metaCast("IOHIDDevice") && accel->init() &&
+                        accel->attach(resource) && accel->start(resource);
+    if (!accelStarted && accel) {
+      accel->detach(resource);
+      OSSafeReleaseNULL(accel);
+      native_hid_accel_object = 0;
+    }
+    native_hid_accel_status = accelStarted ? 1 : 2;
+    // The device orientation device (Sensor page 0x20/0x8a, Apple motion orientation flags), fed with each orientation change.
+    IOService *orient = native_hid_orient_allocate();
+    bool orientStarted = orient && orient->metaCast("IOHIDDevice") && orient->init() &&
+                         orient->attach(resource) && orient->start(resource);
+    if (!orientStarted && orient) {
+      orient->detach(resource);
+      OSSafeReleaseNULL(orient);
+    }
+    native_hid_orient_status = orientStarted ? 1 : 2;
+    // The gyro (Sensor page 0x20/0x7a, stamped 0xff00/9 like the accelerometer): locationd's orientation detector needs one.
+    IOService *gyro = native_hid_gyro_allocate();
+    bool gyroStarted = gyro && gyro->metaCast("IOHIDDevice") && gyro->init() && gyro->attach(resource) && gyro->start(resource);
+    if (!gyroStarted && gyro) {
+      gyro->detach(resource);
+      OSSafeReleaseNULL(gyro);
+    }
+    native_hid_gyro_status = gyroStarted ? 1 : 2;
   }
   result = 0;
   OSSafeReleaseNULL(resource);

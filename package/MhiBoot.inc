@@ -33,6 +33,7 @@ static uint32_t fail(MhiBoot *m, uint32_t error)
 static uint32_t start_sbl(MhiBoot *m)
 {
     wr(m, m->bhi + MHI_BHI_INTVEC, m->msi_vector);  /* a reset clears it */
+    wr(m, m->bhi + MHI_BHI_STATUS, 0);               /* msm mhi_fw_load_sbl clears it first */
     wr(m, m->bhi + MHI_BHI_IMGADDR_HIGH, (uint32_t)(m->sbl_addr >> 32));
     wr(m, m->bhi + MHI_BHI_IMGADDR_LOW, (uint32_t)m->sbl_addr);
     wr(m, m->bhi + MHI_BHI_IMGSIZE, m->sbl_size);
