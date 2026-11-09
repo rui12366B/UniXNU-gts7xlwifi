@@ -1,7 +1,8 @@
 # T970 cameras: hardware, iPadOS side, routes
 
-Status 2026-11-08: C1, C2a and C3a device-verified (all three sensors answer over CCI and stream on their defaults; the front
-sensor's MIPI stream is received cleanly by CSIPHY 3 + CSID-lite0); stage C4 (one RAW10 frame into memory) in source.
+Status 2026-11-08: C1, C2a, C3a and C4 device-verified (all three sensors answer over CCI and stream on their defaults; the front
+sensor's MIPI stream is received cleanly by CSIPHY 3 + CSID-lite0, and one full 3280x2464 RAW10 frame lands in memory through
+IFE-lite0, combo9; auto exposure converges, combo10); stage C5 (continuous capture, T970Camera user client, t970cam) in source.
 `package/T970Camera.cpp`, boot argument `t970-camera=<bits>` (off by default).
 
 ## 0. Sensors (C1 readback, combo1 boot, kernel 60fc5e6c, `t970-camera=7`)
@@ -152,10 +153,57 @@ Order: front S5K4HA first (fewest extras: no actuator, no flash, CSIPHY 3, 8 MP)
   form is refused. `route` now = kind | routed pairs << 4 (bit n+4 = exact-SID fallback) | first slot << 8 | bank << 16; `det`
   holds the first refused SMR as read back. If only exact SIDs stick and no frame arrives, IFE-lite writes with one of the
   `| 0x400` IDs (0xc00..0xc41), and those need their own exact SMRs next.
-- **C4b:** exposure/gain over CCI (SMIA 0x0202 coarse integration, 0x0204 analogue gain) and a simple mean-based AE loop, so the
-  thumbnail is usable. Optionally the full frame later through BootLog's export (needs coordination with the GPU pipeline-cache export).
-- **C5, delivery:** a `T970Camera` IOService + user client that hands out BGRA IOSurfaces (CPU debayer at binned resolution,
-  later a GPU shader), plus a test app. After that, investigate the iPadOS 17 external-camera path (route 4.A.6 b).
+- **C4 combo9 (verified):** `[t970 camera c4] st 7 route 60852 ife 10000001 top|bus 110010 rdi 101ff8 measure 0 written 10093376
+  stats 210f12 ms 65 pa 8e300000 stride 4112 fault 400` + 48 thumbnail rows showing a real (dark) scene with a light at the lower left.
+  - `route 60852` (old layout, slot << 8 overlapped the exact-SID nibble): kind 2 = shared bypass bank, routed mask 0x5 = 0x800 and
+    0x840 accepted with mask 0x400, 0x801 and 0x841 refused both masked and exact (read back 0, hence the main row's `det 7fffffff`),
+    first slot 8, bank 6 (USB's bypass bank, shared as designed). So the hypervisor/SMMU accepts only some IDs, and IFE-lite0
+    writes with an ID covered by 0x800/0x840 | 0x400. The layout is now kind | routed << 4 | slot << 12 | bank << 20.
+  - `top|bus 110010`: top IRQ bit 4 (bus), bus bits 0 (RDI0 reg update) and 4 (WM0 composite done). `ms 65` from stream on to done.
+  - `written 10093376` of 10102400 payload bytes (4100 x 2464; sampled every 64th byte, the rest are LSB bytes that happen to be 0xa5):
+    the whole frame. `stride 4112` = 4100 rounded to 16. `measure 0`: the RDI format measure is not enabled the way gen2 wants; harmless.
+  - `stats 210f12`: mean 18, min 15, max 33 (8-bit MSBs) = about 1 stop above the 10-bit pedestal of 64 (MSB 16): the power-on
+    exposure/gain is far too short for the room. `fault 400` is the shared bank's FSR from earlier BT/audio traffic, as before.
+  - camera-thumb.py's default `--scale 8` is why the PGM is 512x384 (64x48 x 8); `--scale 1` gives the raw 64x48.
+- **C4b (in source, `t970-camera=193` = 1 + 64 + 128):** after C4's first frame, up to 8 more frames with coarse integration 0x0202
+  and analogue gain 0x0204 (grouped hold 0x0104) scaled towards a mean MSB of 72 (pedestal 16 subtracted, at most x8 per step,
+  /4 when clipped); exposure first up to FLL - margin (0x1006, keeps ~24 fps), then gain up to the sensor's 0x0086 max (fallback
+  16x). The thumbnail and `stats` are then the last frame. Manual values: `t970-camera-exp=<lines>` / `t970-camera-gain=<code,
+  0x20 = 1x>` (applied before streaming, with or without bit 128); `t970-camera-target=<24..230>`. Row:
+  `[t970 camera c4b] st <iters | state << 8 | manual << 12> def <coarse | gain << 16 defaults> final <read back> gain <min | max << 16>
+  coarse <min | margin << 16> means <frame 0..3, byte each, low first> <frame 4..7> tgt <target | black << 8 | ms << 16>`; state 1
+  converged, 2 too dark at max exposure+gain, 3 too bright at min, 4 frame timeout, 5 iteration limit, 6 manual only, 7 CCI error.
+  Expected: state 1 in 2-4 iterations, a thumbnail with a mean near 72. Adds ~0.5-1.5 s, no new hardware blocks.
+  Optionally the full frame later through BootLog's export (needs coordination with the GPU pipeline-cache export).
+- **C4b combo10 (verified):** `[t970 camera c4b] st 101 def 2004f0 final 7009de gain 2000020 coarse 40002 means 00004d18 00000000
+  tgt ae1048`: converged (state 1) after 1 step in 174 ms. Defaults coarse 0x4f0 = 1264 lines at gain 0x20 (1x); final 0x9de = 2526
+  lines (FLL 2530 - margin 4, ~1/24 s) at gain 0x70 (3.5x). Gain codes 0x20..0x200 (1x..16x), coarse min 2. Means: 24 -> 77
+  (target 72 +- 10). Thumbnail mean 95 (one Bayer site, probably green), a recognisable room.
+- **C5, getting frames into iOS (in source).** The stock stack (mediaserverd/cameracaptured -> AppleH9CameraInterface RTKit RPC)
+  cannot be fed without emulating the H9 ISP firmware, so C5 is our own path:
+  - **C5a, bit 256: continuous capture.** After C4 (+ C4b) the sensor keeps streaming; the write master is re-armed per frame into
+    2..4 buffers of the pil_cdsp carve-out (now mapped whole, 26 MiB = 0x1a00000 per the FDT; full frames 2 x 10.16 MB, binned 4),
+    never into the buffer the client reads. AE runs every 8 frames. At boot it streams `t970-camera-seconds` (default 5) and stops.
+    Row `[t970 camera c5] st <state | sessions << 8> frames <n> timeouts <n> ms <n> fps10 <frames per 10 s> exp <coarse | gain << 16>
+    mean <last AE mean> buf <buffers | KiB << 8> sites <MSB means (y0x0)|(y0x1)<<8|(y1x0)<<16|(y1x1)<<24> svc <service> uc <opens |
+    starts << 8 | maps << 16 | closes << 24> ae <AE changes>`; state 1 streaming, 2 done, 3 stopped by the client, ff too many
+    timeouts, fe no room. Re-arming after each done may skip every other sensor frame (expect 12-24 fps); `sites` tells the Bayer
+    order (two alike = green; under warm light R > B).
+  - **C5b, bit 512: `T970Camera` IOService + user client** (package/T970CameraService.cpp, ABI package/T970CameraAbi.h), published
+    after the boot run (classes registered between preModLoad/postModLoad like the audio service; build step in
+    scripts/build-gop-legacy-display.py). Memory type 0 = control page (seq/latest/writing/reading, size, stride, exposure), type 1
+    = the carve-out read-only. Methods: Start (powers the front sensor and runs C4 + AE + C5a until Stop or the client closes), Stop,
+    SetExposure(lines, gain; 0,0 = auto). Sandbox grant for the process name `t970cam`. Tear-free hand-off: the client sets
+    `reading`, the kernel sets `writing`, each checks the other after a barrier.
+  - **C5c: tools/t970cam/t970cam.c** (scripts/build-t970cam.py: ad hoc signed + trust.json): opens the service, starts, reports
+    delivered fps, writes the last frame as a half-resolution BMP (RAW10 MSBs, black 16, gray-world WB, gamma 2.2, `-m` mirror,
+    `-b all` writes all four Bayer orders, `-e/-g` manual exposure). Needs staging onto the device (not done here).
+  - **combo11a (verified, t970-camera=961):** `[t970 camera c5] st 2 frames 66 timeouts 0 ms 5033 fps10 131 exp 5109de mean 71 buf
+    26c002 sites 56383756 svc 1 uc 0 ae 0`: 13.1 fps delivered (every other sensor frame), no timeouts, AE held at 2526 lines / 2.5x,
+    service published. Sites (y0x0) 86, (y0x1) 55, (y1x0) 56, (y1x1) 86: green on the (0,0)/(1,1) diagonal, so GRBG or GBRG.
+  - Option `t970-camera-bin=1`: SMIA 2x2 binning (0x0900/0x0901) to 1640x1232 before the setup is read; untested on the S5K4HA.
+  - **C5d later:** a viewer app (IOSurface + Metal debayer) and then whether iPadOS 17's external-camera (UVC/CMIO extension) path
+    can host a virtual camera fed by the service, so AVFoundation apps see it (route 4.A.6 b).
 
 Risks: the S5K3M5 PDAF and actuator (0x0c on CCI1 m1) and the flash come later. CCI1 m1 also holds the EEPROMs (0xa0/0xa2/0xb0),
 which carry calibration (shading, AWB) and are cheap to read once C2b lands.
@@ -164,7 +212,8 @@ which carry calibration (shading, AWB) and are cheap to read once C2b lands.
 
 `t970-camera=<bits>`: 1 front, 2 rear, 4 ultra-wide, 8 leave the last sensor powered, 16 stream test (C2a), 32 CSIPHY/CSID
 receive test on the front sensor (C3a; second row `[t970 camera c3]`, fields in the header of T970Camera.cpp), 64 one-frame capture
-(C4; rows `[t970 camera c4]` and `[t970 camera thumb NN]`). Row
+(C4; rows `[t970 camera c4]` and `[t970 camera thumb NN]`), 128 auto exposure with 64 (C4b; row `[t970 camera c4b]`), 256 continuous capture and 512 the T970Camera service (C5; row
+`[t970 camera c5]`). Row
 `[t970 camera] st <stage> det <detail> gdsc <GDSCR> cci <CCI HW version> front <id> rear <id> wide <id> irq <last CCI IRQ> ms <n>`.
 `front/rear/wide` are the four bytes at register 0x0000 (model ID high, low, then 0x0002/0x0003), or -1 NACK (`ffffffff`),
 -2 timeout, -3 other error, 0 not tried. Stage 8 = done; negative stage = failed at that step (see the header of T970Camera.cpp).

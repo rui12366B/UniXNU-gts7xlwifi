@@ -9,11 +9,11 @@
 +
 +/* gts7xlwifi: the display policy (board.toml text_fixups + /product/artwork-display-gamut = "sRGB", as SM-T733's
 + * 21H461-srgb-bgra8-1) changes MobileGestalt answers such as hasExtendedColorDisplay, but MG persists its answers. Once per
-+ * policy version (/private/var/db/.t970-display-policy-1), before launchd starts, this moves MG's persisted caches aside
++ * policy version (/private/var/db/.t970-display-policy-2; -2: the Bluetooth address, t970-bt serve), before launchd starts, this moves MG's persisted caches aside
 + * (".t970" suffix) so every consumer recomputes them from the ADT. Counters for the boot log: [0] stage (1 moved, 2 done
 + * before, -2 the marker failed), [1] files moved, [2] the last error. */
 +volatile int native_t970_mgcache[3] = {0, 0, 0};
-+static const char native_t970_mgcache_marker[] = "/private/var/db/.t970-display-policy-1";
++static const char native_t970_mgcache_marker[] = "/private/var/db/.t970-display-policy-2";
 +static void
 +native_t970_mgcache_once(proc_t p, user_addr_t scratch)
 +{

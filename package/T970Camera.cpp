@@ -35,6 +35,10 @@
 // shared, else the first free one from NUMS2CB up), restored afterwards. The buffer is filled with 0xa5 first; after the first write-master done the frame is measured (coverage,
 // mean/min/max of the 8 MSBs) and a 64x48 single-Bayer-site thumbnail goes to t970_camera_thumb, which BootLog prints as 48 rows
 // "[t970 camera thumb NN] <128 hex>" (tools/camera-thumb.py turns them into a PGM). The full frame stays in the carve-out.
+// 128 auto exposure (stage C4b, with 64): after the first frame, up to 8 more frames with coarse integration 0x0202 and analogue
+// gain 0x0204 scaled towards a mean of t970-camera-target=<MSB 24..230, default 72>; the thumbnail is then the last frame.
+// t970-camera-exp=<lines> / t970-camera-gain=<code, 0x20 = 1x> set fixed values before streaming (with or without 128).
+// Status in t970_camera_ae[] (see autoExposure), BootLog row "[t970 camera c4b]".
 //
 // Status t970_camera[]: [0] stage, [1] error detail (CCI IRQ status, or the register that did not come up), [2] GDSCR read back,
 // [3] CCI HW version, [4..6] per sensor (front, rear, wide): ID word (bytes 0x0000..0x0003 big-endian), 0 = not tried,
@@ -49,7 +53,7 @@
 // [27] CSIPHY common status 0..3 bytes after the stream.
 // C4 ([28..39], front): [28] C4 stage (1 buffer mapped, 2 SMMU routed, 3 IFE reset, 4 WM + RDI armed, 5 frame done, 6 measured,
 // 7 done; negative = failed), [29] SMMU route: kind (2 shared bank, 3 new bank) | routed pairs << 4 (bit n kSids[n], bit n + 4
-// only as the exact SID) | first slot << 8 | bank << 16, or negative (-4 an SMR overlaps, det = it; -9 none read back, det = the
+// only as the exact SID) | first slot << 12 | bank << 20 (combo9 and earlier: slot << 8, bank << 16), or negative (-4 an SMR overlaps, det = it; -9 none read back, det = the
 // first refused SMR as read back; with any pair routed, det also holds the first refused readback),
 // [30] IFE-lite HW version, [31] IFE top IRQ status seen | bus IRQ status 0 seen << 16 (bit 16+4 = WM0 comp done),
 // [32] CSID RDI0 IRQ status seen, [33] CSID RDI0 format measure (height << 16 | width), [34] bytes of the expected window
@@ -58,12 +62,25 @@
 #include <IOKit/IOLib.h>
 #include <IOKit/IOMemoryDescriptor.h>
 #include <IOKit/IODeviceMemory.h>
+#include <IOKit/IOBufferMemoryDescriptor.h>
+#include <libkern/c++/OSMetaClass.h>
+#include <mach/kmod.h>
 #include <kern/thread.h>
 #include <kern/clock.h>
 #include <pexpert/pexpert.h>
 #include <stdint.h>
 
 extern "C" {volatile int32_t t970_camera[40]; volatile uint8_t t970_camera_thumb[64 * 48];}
+#include "T970CameraAbi.h"
+// C5 status: [0] state (1 streaming, 2 done after t970-camera-seconds, 3 stopped by the client, -1 too many frame timeouts, -2 no room
+// for 2 buffers) | sessions << 8, [1] frames, [2] frame timeouts, [3] ms streamed, [4] frames per 10 s, [5] coarse | gain << 16 at
+// the end, [6] last AE mean, [7] buffers | buffer KiB << 8, [8] MSB means of the four Bayer sites of the last frame, (y0 x0) |
+// (y0 x1) << 8 | (y1 x0) << 16 | (y1 x1) << 24, [9] service (T970CameraService.cpp; 1 published), [10] user clients opens |
+// starts << 8 | maps << 16 | closes << 24, [11] AE changes while streaming.
+extern "C" {volatile int32_t t970_camera_c5[12];}
+extern kmod_info_t g_kernel_kmod_info;
+extern "C" void t970_camera_service_static_init(void) __asm__("__GLOBAL__sub_I_T970CameraService.cpp");
+extern "C" void t970_camera_service_start(void);
 
 namespace {
 constexpr uint64_t kGcc = 0x00100000, kCamcc = 0x0ad00000, kTlmm = 0x0f000000, kSouth = 0x500000, kNorth = 0x900000;
@@ -401,7 +418,7 @@ void csidOff(volatile uint32_t *d) {wr(d, 0x108, 0); wr(d, 0x100, 0); wr(d, 0x24
 
 
 // ---- stage C4: one frame through CSID-lite0 RDI0 and IFE-lite0 write master 0 ----
-constexpr uint64_t kSmmu = 0x15000000, kSmmuBytes = 0x100000, kDefaultFramePa = 0x8e300000, kFrameBytes = 0x1000000;
+constexpr uint64_t kSmmu = 0x15000000, kSmmuBytes = 0x100000, kDefaultFramePa = 0x8e300000, kFrameBytes = 0x1a00000;
 volatile int32_t &c4st = t970_camera[28];
 bool c4fail(int s, int32_t detail) {c4st = -s; st[1] = detail; return false;}
 
@@ -422,6 +439,7 @@ bool overlaps(uint32_t smr, uint32_t id, uint32_t mask) {
 // kind (2 shared bank, 3 new bank) | routed pairs mask << 4 (bit n: kSids[n] routed; bit n + 4: only as the exact SID), or negative.
 int routeStreams() {
     if (!gSmmuW.va && !mapWindow(gSmmuW, kSmmu, kSmmuBytes)) return -1;
+    gBank = 0xffff; gNewBank = false;                          // a C5 session routes again
     const uint32_t cr0 = sr(0), id0 = sr(0x20), id1 = sr(0x24);
     if (cr0 & (1u << 3)) return -2;
     const uint32_t streams = id0 & 0xff, banks = id1 & 0xff, ns2 = (id1 >> 16) & 0xff;
@@ -564,9 +582,236 @@ void measure(const volatile uint8_t *b, uint32_t stride, uint32_t lineBytes, uin
     }
 }
 
+unsigned gBits;
+
+// ---- stage C4b: exposure and analogue gain over the CCI, simple auto exposure on the RDI frames ----
+// SMIA++ registers: coarse_integration_time 0x0202 (lines), analogue_gain_code_global 0x0204 (Samsung: 0x20 = 1x), grouped
+// parameter hold 0x0104, gain code min/max 0x0084/0x0086, coarse integration min 0x1004 / max margin 0x1006 (max = FLL - margin).
+// Status t970_camera_ae[]: [0] AE iterations | state << 8 (1 converged, 2 too dark at max, 3 too bright at min, 4 frame timeout,
+// 5 iteration limit, 6 manual values only, 7 CCI error) | manual << 12; [1] sensor default coarse | gain << 16; [2] final
+// coarse | gain << 16 as read back; [3] gain code min | max << 16; [4] coarse min | margin << 16; [5]/[6] mean of each AE frame
+// (8-bit MSBs, all Bayer sites), one byte per frame, 8 frames; [7] target | black << 8 | AE ms << 16.
+extern "C" {volatile int32_t t970_camera_ae[8];}
+constexpr uint32_t kBlack = 16;                                 // 10-bit pedestal 64 as an MSB byte (combo9 min 15)
+struct Ae {uint32_t coarse, gain, gMin, gMax, cMin, cMax;};
+
+int writeU16(volatile uint32_t *c, const Sensor &s, uint16_t reg, uint32_t v) {
+    const int rc = writeReg(c, s.master, s.addr, reg, uint8_t(v >> 8));
+    return rc ? rc : writeReg(c, s.master, s.addr, uint16_t(reg + 1), uint8_t(v));
+}
+int setExposure(volatile uint32_t *c, const Sensor &s, uint32_t coarse, uint32_t gain) {
+    int rc = writeReg(c, s.master, s.addr, 0x0104, 1);
+    if (!rc) rc = writeU16(c, s, 0x0202, coarse);
+    if (!rc) rc = writeU16(c, s, 0x0204, gain);
+    const int rc2 = writeReg(c, s.master, s.addr, 0x0104, 0);
+    return rc ? rc : rc2;
+}
+// Sensor limits and defaults; bad or missing limits fall back to 1x..16x and margin 8.
+bool aeLimits(volatile uint32_t *c, const Sensor &s, uint32_t fll, Ae &a) {
+    uint32_t margin = 0;
+    if (readU16(c, s, 0x0202, a.coarse) || readU16(c, s, 0x0204, a.gain) || readU16(c, s, 0x0084, a.gMin) ||
+        readU16(c, s, 0x0086, a.gMax) || readU16(c, s, 0x1004, a.cMin) || readU16(c, s, 0x1006, margin)) return false;
+    t970_camera_ae[1] = int32_t(a.coarse | a.gain << 16);
+    t970_camera_ae[3] = int32_t(a.gMin | a.gMax << 16);
+    t970_camera_ae[4] = int32_t(a.cMin | margin << 16);
+    if (!a.gMin || a.gMax <= a.gMin || a.gMax > 0x400) {a.gMin = 0x20; a.gMax = 0x200;}
+    if (!a.cMin || a.cMin > 64) a.cMin = 1;
+    if (!margin || margin > 64) margin = 8;
+    a.cMax = fll > margin + a.cMin ? fll - margin : a.cMin;
+    return true;
+}
+// Mean of the MSBs over a sparse grid that walks all four Bayer sites (odd steps), and the share of clipped samples (x1000).
+uint32_t frameMean(const volatile uint8_t *b, uint32_t stride, uint32_t width, uint32_t lines, uint32_t &clip) {
+    uint64_t sum = 0, n = 0, hot = 0;
+    for (uint32_t y = 0; y < lines; y += 15)
+        for (uint32_t xp = 0; xp < width; xp += 9) {
+            const uint32_t v = b[y * stride + (xp / 4) * 5 + xp % 4];
+            sum += v; ++n; if (v >= 250) ++hot;
+        }
+    clip = n ? uint32_t(hot * 1000 / n) : 0;
+    return n ? uint32_t(sum / n) : 0;
+}
+// One more frame from the running RDI0 into the same buffer: re-arm WM0, wait for its done (up to 400 ms).
+bool nextFrame(volatile uint32_t *f, uint32_t pa, uint32_t stride, uint32_t lines) {
+    wr(f, kBus + 0x20, 0xffffffffu); wr(f, kBus + 0x30, 1);
+    wmArm(f, pa, stride, lines);
+    for (unsigned i = 0; i < 80; ++i) {
+        IOSleep(5);
+        const uint32_t b = rd(f, kBus + 0x28);
+        if (b) {wr(f, kBus + 0x20, b); wr(f, kBus + 0x30, 1);}
+        if (b & (1u << 4)) {wmStop(f); return true;}
+    }
+    wmStop(f);
+    return false;
+}
+// Total exposure E = coarse * gain / 0x20 (line units at 1x). Each step scales E by (target - black) / (mean - black), limited
+// to 1/8..8 per step; exposure time first (up to FLL - margin, so the frame rate stays), then analogue gain.
+// One AE decision on a measured mean: 0 within target +- 1/8, 1 new values written, 2 too dark at max, 3 too bright at min,
+// 7 CCI error.
+unsigned aeStep(volatile uint32_t *c, const Sensor &s, Ae &a, uint32_t mean, uint32_t clip, uint32_t target) {
+    const uint32_t tol = target / 8 + 1;
+    if (mean + tol >= target && mean <= target + tol) return 0;
+    const uint64_t e = uint64_t(a.coarse) * a.gain;                   // x 0x20
+    uint64_t want;
+    if (mean >= 240 || clip > 200) want = e / 4;
+    else {
+        const uint32_t sig = mean > kBlack ? mean - kBlack : 1;
+        want = e * (target - kBlack) / sig;
+        if (want > e * 8) want = e * 8;
+        if (want < e / 8) want = e / 8;
+    }
+    uint32_t coarse = uint32_t(want / a.gMin);
+    if (coarse > a.cMax) coarse = a.cMax;
+    if (coarse < a.cMin) coarse = a.cMin;
+    uint64_t g = want / coarse;
+    if (g > a.gMax) g = a.gMax;
+    if (g < a.gMin) g = a.gMin;
+    if (coarse == a.coarse && g == a.gain) return mean < target ? 2 : 3;
+    a.coarse = coarse; a.gain = uint32_t(g);
+    return setExposure(c, s, a.coarse, a.gain) ? 7 : 1;
+}
+void autoExposure(volatile uint32_t *c, const Sensor &s, volatile uint32_t *f, uint32_t pa, uint32_t stride, uint32_t width,
+                  uint32_t lines, Ae &a, uint32_t target) {
+    volatile int32_t *const ae = t970_camera_ae;
+    const uint64_t t0 = nowMs();
+    unsigned it = 0, state = 5;
+    uint32_t hist[8] = {};
+    for (; it < 8; ++it) {
+        uint32_t clip = 0;
+        const uint32_t mean = frameMean(reinterpret_cast<const volatile uint8_t *>(gFrameW.va), stride, width, lines, clip);
+        hist[it] = mean > 255 ? 255 : mean;
+        const unsigned r = aeStep(c, s, a, mean, clip, target);
+        if (r != 1) {state = r == 0 ? 1 : r; break;}
+        IOSleep(90);                                                  // two frames at ~24 fps: the new values are in effect
+        if (!nextFrame(f, pa, stride, lines)) {state = 4; break;}
+    }
+    ae[5] = int32_t(hist[0] | hist[1] << 8 | hist[2] << 16 | hist[3] << 24);
+    ae[6] = int32_t(hist[4] | hist[5] << 8 | hist[6] << 16 | hist[7] << 24);
+    ae[0] = int32_t((ae[0] & 0xf000) | (it & 0xff) | state << 8);
+    ae[7] = int32_t((target & 0xff) | kBlack << 8 | uint32_t(nowMs() - t0) << 16);
+}
+
+// ---- stage C5a: continuous capture into 2..4 buffers in the carve-out (t970-camera bit 256), C5b sessions for the user client ----
+IOBufferMemoryDescriptor *gCtlMem;
+T970CameraControl *gCtl;
+uint32_t gRun, gBusy, gManualDirty, gManExp, gManGain, gSessions, gFramePa = uint32_t(kDefaultFramePa);
+bool gSession;
+
+// Next buffer for the write master: not the newest frame and not the one the client reads; the client's flag and ours are
+// checked Dekker-style (each side writes its own, barrier, reads the other's), so a buffer being read is never re-armed.
+uint32_t pickBuffer(uint32_t n, uint32_t latest) {
+    T970CameraControl *k = gCtl;
+    uint32_t w = latest;
+    for (unsigned round = 0; round < 4; ++round) {
+        const uint32_t reading = k ? k->reading : T970_CAMERA_NONE;
+        w = T970_CAMERA_NONE;
+        for (uint32_t i = 1; i <= n && w == T970_CAMERA_NONE; ++i) {
+            const uint32_t j = (latest + i) % n;
+            if (j != latest && j != reading) w = j;
+        }
+        for (uint32_t j = 0; j < n && w == T970_CAMERA_NONE; ++j) if (j != reading) w = j;
+        if (w == T970_CAMERA_NONE) w = (latest + 1) % n;
+        if (!k) break;
+        k->writing = w;
+        barrier();
+        if (k->reading != w) break;
+    }
+    return w;
+}
+// Returns the byte offset of the newest complete frame. Buffer 0 holds the C4/C4b frame on entry.
+uint32_t streamLoop(volatile uint32_t *c, const Sensor &s, volatile uint32_t *f, uint32_t pa, uint32_t stride, uint32_t width,
+                    uint32_t lines, uint32_t dt, Ae &a, uint32_t target, bool aeOk) {
+    volatile int32_t *const v = t970_camera_c5;
+    const uint32_t bytes = (stride * lines + 0xffffu) & ~0xffffu;
+    uint32_t n = bytes ? uint32_t(kFrameBytes / bytes) : 0;
+    if (n > T970_CAMERA_MAX_BUFFERS) n = T970_CAMERA_MAX_BUFFERS;
+    v[7] = int32_t(n | (bytes >> 10) << 8);
+    const uint32_t sessions = uint32_t(v[0]) & ~0xffu;
+    if (n < 2) {v[0] = int32_t(sessions | 0xfe); return 0;}
+    T970CameraControl *k = gCtl;
+    uint32_t latest = 0, seq = 1, frames = 0, timeouts = 0, run = 0, aeChanges = 0;
+    if (k) {
+        k->width = width; k->height = lines; k->stride = stride; k->data_type = dt; k->buffers = n; k->buffer_bytes = bytes;
+        for (uint32_t i = 0; i < T970_CAMERA_MAX_BUFFERS; ++i) k->buffer_offset[i] = i < n ? i * bytes : 0;
+        k->frame_bytes = uint32_t(kFrameBytes); k->exposure = a.coarse; k->gain = a.gain; k->timeouts = 0;
+        k->latest = 0; k->writing = T970_CAMERA_NONE; k->timestamp = mach_absolute_time();
+        barrier();
+        k->seq = seq; k->state = T970CameraStreaming;
+        barrier();
+    }
+    unsigned secs = 5;
+    if (!PE_parse_boot_argn("t970-camera-seconds", &secs, sizeof secs) || !secs || secs > 600) secs = 5;
+    v[0] = int32_t(sessions | 1);
+    const uint64_t t0 = nowMs();
+    int state = 2;
+    for (;;) {
+        if (gSession ? !__atomic_load_n(&gRun, __ATOMIC_ACQUIRE) : nowMs() - t0 >= uint64_t(secs) * 1000) {state = gSession ? 3 : 2; break;}
+        const uint32_t w = pickBuffer(n, latest);
+        if (!nextFrame(f, pa + w * bytes, stride, lines)) {
+            ++timeouts;
+            if (k) {k->writing = T970_CAMERA_NONE; k->timeouts = timeouts;}
+            if (++run >= 10) {state = -1; break;}
+            continue;
+        }
+        run = 0; latest = w; ++frames; ++seq;
+        if (k) {
+            k->latest = w; k->timestamp = mach_absolute_time();
+            barrier();
+            k->seq = seq; k->writing = T970_CAMERA_NONE;
+            barrier();
+        }
+        v[1] = int32_t(frames);
+        if (__atomic_exchange_n(&gManualDirty, 0u, __ATOMIC_ACQ_REL)) {
+            if (gManExp && a.gMin) {
+                a.coarse = gManExp < a.cMin ? a.cMin : gManExp > a.cMax ? a.cMax : gManExp;
+                a.gain = !gManGain ? a.gain : gManGain < a.gMin ? a.gMin : gManGain > a.gMax ? a.gMax : gManGain;
+                (void)setExposure(c, s, a.coarse, a.gain);
+            }
+        } else if (aeOk && !gManExp && (frames & 7) == 0) {
+            uint32_t clip = 0;
+            const uint32_t mean = frameMean(reinterpret_cast<const volatile uint8_t *>(gFrameW.va) + latest * bytes, stride, width,
+                                            lines, clip);
+            v[6] = int32_t(mean);
+            if (k) k->mean = mean;
+            if (aeStep(c, s, a, mean, clip, target) == 1) ++aeChanges;
+        }
+        if (k) {k->exposure = a.coarse; k->gain = a.gain;}
+    }
+    const uint32_t ms = uint32_t(nowMs() - t0);
+    if (k) k->writing = T970_CAMERA_NONE;
+    v[0] = int32_t(sessions | (uint32_t(state) & 0xff));
+    v[1] = int32_t(frames); v[2] = int32_t(timeouts); v[3] = int32_t(ms); v[4] = int32_t(ms ? uint64_t(frames) * 10000 / ms : 0);
+    v[5] = int32_t(a.coarse | a.gain << 16); v[11] = int32_t(aeChanges);
+    // Bayer site means of the newest frame (which colour sits where is not known yet; green pairs come out alike).
+    const volatile uint8_t *b = reinterpret_cast<const volatile uint8_t *>(gFrameW.va) + latest * bytes;
+    uint32_t site[4] = {};
+    uint32_t cnt = 0;
+    for (uint32_t y = 0; y + 1 < lines; y += 16)
+        for (uint32_t xp = 0; xp + 1 < width; xp += 16) {
+            for (uint32_t q = 0; q < 4; ++q) {
+                const uint32_t yy = y + (q >> 1), xx = xp + (q & 1);
+                site[q] += b[yy * stride + (xx / 4) * 5 + xx % 4];
+            }
+            ++cnt;
+        }
+    if (cnt) v[8] = int32_t(site[0] / cnt | (site[1] / cnt) << 8 | (site[2] / cnt) << 16 | (site[3] / cnt) << 24);
+    return latest * bytes;
+}
+
 void capture(volatile uint32_t *c, const Sensor &s, bool frame) {
     volatile int32_t *const x = t970_camera;
     c3st = 1;
+    // C5 option t970-camera-bin=1: SMIA 2x2 binning (0x0900 = 1, 0x0901 = 0x22) to 1640x1232 before the setup is read, so the
+    // whole receive path follows. Untested on the S5K4HA; the stream loop then fits four buffers.
+    unsigned bin = 0;
+    if (frame && PE_parse_boot_argn("t970-camera-bin", &bin, sizeof bin) && bin) {
+        (void)writeReg(c, s.master, s.addr, 0x0104, 1);
+        (void)writeReg(c, s.master, s.addr, 0x0900, 1);
+        (void)writeReg(c, s.master, s.addr, 0x0901, 0x22);
+        (void)writeU16(c, s, 0x034c, 1640);
+        (void)writeU16(c, s, 0x034e, 1232);
+        (void)writeReg(c, s.master, s.addr, 0x0104, 0);
+    }
     uint32_t fmt = 0, lanesReg = 0, xo = 0, yo = 0, llp = 0, fll = 0, rateHi = 0;
     uint8_t laneByte = 0;
     if (readU16(c, s, 0x0112, fmt) || readRegs(c, s.master, s.addr, 0x0114, &laneByte, 1) || readU16(c, s, 0x034c, xo) ||
@@ -607,19 +852,22 @@ void capture(volatile uint32_t *c, const Sensor &s, bool frame) {
     const uint32_t lineBytes = xo * (out == 8 ? 8 : out == 12 ? 12 : 10) / 8, stride = (lineBytes + 15) & ~15u;
     uint32_t lines = yo, cropLines = 0, framePa = uint32_t(kDefaultFramePa);
     (void)PE_parse_boot_argn("t970-camera-pa", &framePa, sizeof framePa);
+    gFramePa = framePa;
     if (PE_parse_boot_argn("t970-camera-lines", &cropLines, sizeof cropLines) && cropLines && cropLines < yo) lines = cropLines;
     bool armed = false;
+    uint32_t latestOff = 0;
     if (frame) {
         c4st = 0;
         x[37] = int32_t(framePa >> 12); x[38] = int32_t(stride);
         if (!lineBytes || uint64_t(stride) * lines > kFrameBytes || (framePa & 0xfff)) c4fail(1, int32_t(stride));
         else if (!gFrameW.va && !mapWindow(gFrameW, framePa, kFrameBytes)) c4fail(1, -1);
         else {
-            for (uint32_t i = 0; i < kFrameBytes / 4; ++i) gFrameW.va[i] = 0xa5a5a5a5u;
+            for (uint32_t i = 0; i < 0x1000000 / 4; ++i) gFrameW.va[i] = 0xa5a5a5a5u;   // the first 16 MiB: buffer 0 and slack
             barrier();
             c4st = 1;
             const int route = routeStreams();
-            x[29] = route < 0 ? route : int32_t(uint32_t(route) | (gSlots[0] & 0xff) << 8 | (gBank & 0xff) << 16);
+            // combo9: slot << 8 overlapped the routed mask's exact-SID nibble; slot and bank now sit above it.
+            x[29] = route < 0 ? route : int32_t(uint32_t(route) | (gSlots[0] & 0xff) << 12 | (gBank & 0xff) << 20);
             if (route < 0) {c4st = -2; if (!st[1]) st[1] = route;}   // -4/-9 leave the SMR in det
             else {
                 c4st = 2;
@@ -633,6 +881,31 @@ void capture(volatile uint32_t *c, const Sensor &s, bool frame) {
                     c4st = 4;
                     armed = true;
                 }
+            }
+        }
+    }
+
+    // C4b: manual t970-camera-exp=<lines> / t970-camera-gain=<code> before streaming; bit 128 runs auto exposure after frame 1.
+    Ae ae = {};
+    uint32_t target = 72;
+    const bool aeOn = armed && (gBits & 128);
+    if (armed) {
+        uint32_t expArg = 0, gainArg = 0;
+        const bool manual = PE_parse_boot_argn("t970-camera-exp", &expArg, sizeof expArg) |
+                            PE_parse_boot_argn("t970-camera-gain", &gainArg, sizeof gainArg);
+        (void)PE_parse_boot_argn("t970-camera-target", &target, sizeof target);
+        if (target < kBlack + 8 || target > 230) target = 72;
+        if (aeOn || manual) {
+            if (!aeLimits(c, s, fll, ae)) t970_camera_ae[0] = 7 << 8;
+            else {
+                if (manual) {
+                    if (expArg) ae.coarse = expArg < ae.cMin ? ae.cMin : expArg > ae.cMax ? ae.cMax : expArg;
+                    if (gainArg) ae.gain = gainArg < ae.gMin ? ae.gMin : gainArg > ae.gMax ? ae.gMax : gainArg;
+                    t970_camera_ae[0] = (aeOn ? 0 : 6 << 8) | 1 << 12;
+                    if (setExposure(c, s, ae.coarse, ae.gain)) t970_camera_ae[0] = 7 << 8 | 1 << 12;
+                }
+                if (ae.gain < ae.gMin) ae.gain = ae.gMin;               // AE math needs a sane starting gain
+                if (ae.coarse < ae.cMin) ae.coarse = ae.cMin;
             }
         }
     }
@@ -657,6 +930,13 @@ void capture(volatile uint32_t *c, const Sensor &s, bool frame) {
     if (armed) {
         if (c4st != 5) wmStop(f);
         x[31] = int32_t((top & 0xffff) | bus << 16); x[32] = int32_t(rdi); x[33] = int32_t(rd(d, 0x278));
+        if (aeOn && c4st == 5 && (t970_camera_ae[0] & 0xf00) != (7 << 8))
+            autoExposure(c, s, f, framePa, stride, xo, lines, ae, target);
+        if (t970_camera_ae[0] || aeOn) {
+            uint32_t co = 0, ga = 0;
+            if (!readU16(c, s, 0x0202, co) && !readU16(c, s, 0x0204, ga)) t970_camera_ae[2] = int32_t(co | ga << 16);
+        }
+        if ((gBits & 256) && c4st == 5) latestOff = streamLoop(c, s, f, framePa, stride, xo, lines, dt, ae, target, aeOn && ae.gMin);
     }
     x[18] = int32_t(seen);
     x[19] = int32_t(rd(d, 0x160)); x[20] = int32_t(rd(d, 0x164)); x[21] = int32_t(rd(d, 0x168));
@@ -674,7 +954,7 @@ void capture(volatile uint32_t *c, const Sensor &s, bool frame) {
         (void)rootXo(0xc0f8, 0);
         branchOff(gCamcc, 0xc044);
         // Measured even without a done interrupt: coverage then tells whether the write master wrote anything at all.
-        measure(reinterpret_cast<const volatile uint8_t *>(gFrameW.va), stride, lineBytes, xo, lines);
+        measure(reinterpret_cast<const volatile uint8_t *>(gFrameW.va) + latestOff, stride, lineBytes, xo, lines);
         if (c4st == 5) c4st = 6;
         IOLog("t970-camera: c4 route %x ife %x top|bus %x rdi %x measure %x written %d stats %x ms %d fault %x\n", unsigned(x[29]),
               unsigned(x[30]), unsigned(x[31]), unsigned(x[32]), unsigned(x[33]), int(x[34]), unsigned(x[35]), int(x[36]),
@@ -692,7 +972,6 @@ void capture(volatile uint32_t *c, const Sensor &s, bool frame) {
     if (!rc) c3st = 7;
 }
 
-unsigned gBits;
 int32_t probe(const Sensor &s, unsigned index, bool keep) {
     st[0] = 5;
     if (!gCciW[s.cci].va && !mapWindow(gCciW[s.cci], kCci[s.cci], 0x1000)) {fail(5, -1); return -3;}
@@ -730,9 +1009,7 @@ int32_t probe(const Sensor &s, unsigned index, bool keep) {
     return result;
 }
 
-void worker(void *, wait_result_t) {
-    thread_set_thread_name(current_thread(), "t970-camera");
-    IOSleep(4000);   // after the display, touch and USB log are up, so a hang here is visible in the log
+void runOnce() {
     const uint64_t t0 = nowMs();
     if (clocksOn()) {
         int last = -1;
@@ -751,6 +1028,88 @@ void worker(void *, wait_result_t) {
         gPins = 0;
     }
 }
+
+// C5b: the control page, then T970CameraService.cpp's classes (registered here, between preModLoad and postModLoad, as
+// T970Audio.cpp does for its service) and the service itself.
+void publishService() {
+    gCtlMem = IOBufferMemoryDescriptor::withOptions(kIODirectionInOut | kIOMemoryKernelUserShared, 4096, 4096);
+    if (!gCtlMem) {t970_camera_c5[9] = -3; return;}
+    gCtl = static_cast<T970CameraControl *>(gCtlMem->getBytesNoCopy());
+    bzero(gCtl, 4096);
+    gCtl->magic = T970_CAMERA_MAGIC; gCtl->version = T970_CAMERA_VERSION;
+    gCtl->reading = T970_CAMERA_NONE; gCtl->writing = T970_CAMERA_NONE; gCtl->latest = T970_CAMERA_NONE;
+    gCtl->frame_bytes = uint32_t(kFrameBytes);
+    void *handle = OSMetaClass::preModLoad(g_kernel_kmod_info.name);
+    if (!handle) {t970_camera_c5[9] = -4; return;}
+    t970_camera_service_static_init();
+    if (OSMetaClass::postModLoad(handle)) {t970_camera_c5[9] = -5; return;}
+    t970_camera_service_start();
+}
+
+void worker(void *, wait_result_t) {
+    thread_set_thread_name(current_thread(), "t970-camera");
+    IOSleep(4000);   // after the display, touch and USB log are up, so a hang here is visible in the log
+    runOnce();
+    if (gBits & 512) publishService();
+    __atomic_store_n(&gBusy, 0u, __ATOMIC_RELEASE);
+}
+
+// One client session: the front sensor with C4 + AE + streaming until T970CameraStop or the client's close.
+void sessionWorker(void *, wait_result_t) {
+    thread_set_thread_name(current_thread(), "t970-camera-c5");
+    gSession = true;
+    gBits = 1 | 64 | 128 | 256 | 512;
+    st[0] = 0;
+    t970_camera[28] = 0;
+    gSessions = (gSessions + 1) & 0xffffff;
+    t970_camera_c5[0] = int32_t(gSessions << 8);
+    runOnce();
+    const uint32_t c5 = uint32_t(t970_camera_c5[0]) & 0xff;
+    if (gCtl) {
+        gCtl->writing = T970_CAMERA_NONE;
+        if (c5 == 3) gCtl->state = T970CameraStopped;
+        else {
+            gCtl->error = c5 == 0xff ? -1 : c5 == 0xfe ? -2 : t970_camera[28] < 0 ? t970_camera[28] : st[0] < 0 ? st[0] : 0;
+            gCtl->state = T970CameraFailed;
+        }
+    }
+    gSession = false;
+    __atomic_store_n(&gRun, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&gBusy, 0u, __ATOMIC_RELEASE);
+}
+}
+
+// T970CameraService.cpp's hooks. 0 accepted, 1 busy (the boot run or a session that is stopping), 2 not available.
+extern "C" int t970_camera_request(uint32_t selector, uint32_t a, uint32_t b) {
+    if (!gCtl) return 2;
+    if (selector == T970CameraStop) {__atomic_store_n(&gRun, 0u, __ATOMIC_RELEASE); return 0;}
+    if (selector == T970CameraSetExposure) {
+        gManExp = a; gManGain = b;
+        gCtl->manual_exposure = a; gCtl->manual_gain = b;
+        __atomic_store_n(&gManualDirty, 1u, __ATOMIC_RELEASE);
+        return 0;
+    }
+    if (selector != T970CameraStart) return 2;
+    if (__atomic_load_n(&gBusy, __ATOMIC_ACQUIRE)) return gSession && __atomic_load_n(&gRun, __ATOMIC_ACQUIRE) ? 0 : 1;
+    if (__atomic_exchange_n(&gBusy, 1u, __ATOMIC_ACQ_REL)) return 1;
+    __atomic_store_n(&gRun, 1u, __ATOMIC_RELEASE);
+    gCtl->error = 0; gCtl->seq = 0; gCtl->latest = T970_CAMERA_NONE; gCtl->writing = T970_CAMERA_NONE; gCtl->timeouts = 0;
+    gCtl->state = T970CameraStarting;
+    thread_t thread = nullptr;
+    if (kernel_thread_start(sessionWorker, nullptr, &thread) != KERN_SUCCESS) {
+        gCtl->state = T970CameraFailed; gCtl->error = -9;
+        __atomic_store_n(&gRun, 0u, __ATOMIC_RELEASE);
+        __atomic_store_n(&gBusy, 0u, __ATOMIC_RELEASE);
+        return 2;
+    }
+    thread_deallocate(thread);
+    return 0;
+}
+extern "C" IOMemoryDescriptor *t970_camera_memory(uint32_t type) {
+    if (!gCtlMem) return nullptr;
+    if (type == T970CameraMemoryControl) {gCtlMem->retain(); return gCtlMem;}
+    if (type == T970CameraMemoryFrames) return IOMemoryDescriptor::withPhysicalAddress(gFramePa, kFrameBytes, kIODirectionIn);
+    return nullptr;
 }
 
 extern "C" void t970_camera_start(void) {
@@ -760,7 +1119,8 @@ extern "C" void t970_camera_start(void) {
     if (__atomic_exchange_n(&started, 1u, __ATOMIC_ACQ_REL)) return;
     gBits = bits;
     st[0] = 0;
+    __atomic_store_n(&gBusy, 1u, __ATOMIC_RELEASE);
     thread_t thread = nullptr;
     if (kernel_thread_start(worker, nullptr, &thread) == KERN_SUCCESS) thread_deallocate(thread);
-    else {st[0] = -9; st[1] = 0;}
+    else {st[0] = -9; st[1] = 0; __atomic_store_n(&gBusy, 0u, __ATOMIC_RELEASE);}
 }

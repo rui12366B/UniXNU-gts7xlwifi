@@ -17,6 +17,18 @@ static void ringPush(volatile uint32_t (*ring)[4],volatile uint32_t &count,uint6
 }
 extern "C" {int (*native_adreno_dram_read32)(uint64_t,uint32_t *);int (*native_adreno_cached_read32)(uint64_t,uint32_t *);
     int (*native_adreno_line_audit)(uint64_t,size_t,uint32_t *,uint32_t *);}
+/* gts7xlwifi gpufault1: the board's hook that ends a translation fault latched in a context bank's FSR (records it, terminates a
+ * stalled transaction, clears the FSR); nonzero when it ended one. A GPU page fault (a client's shader or command stream reading an
+ * address no table maps) latched FSR TF; every later proof of the bank (ArmSmmu4KObserveOwnedContext, every 64th table operation
+ * and each new VM's attach) then returned ArmSmmu4KFault and NativeAdrenoVm::fail poisoned that VM, one after another, until no
+ * process could map or open the GPU (combo6/int5/int1b/periph12: [gpu vmfail] st 11 stage 11, [gpu tables] err e00002ca at b30,
+ * mount fail stage 1). A translation fault is the faulting client's error, not a broken table: the bank is ended and proved again.
+ * A global fault (sGFSR), a changed image or a fault that comes back at once still fail as before. */
+extern "C" {int (*native_adreno_bank_fault_end)(unsigned bank)=nullptr;volatile uint32_t native_adreno_bank_fault_retries[2];}
+static bool endBankFault(const ArmSmmu4KStreamState *streams)
+{
+    return streams && native_adreno_bank_fault_end && native_adreno_bank_fault_end(streams->bank);
+}
 #include <string.h>
 #include <IOKit/IOLib.h>
 /* 1 once the board proved the GPU's cacheable inner-shareable accesses coherent with the CPU's caches in both directions (the A740's
@@ -88,10 +100,18 @@ ArmSmmu4KStatus NativeAdrenoVm::observeStreamsOnly() const
  * regions every 64th operation stalled a map 37 ms). */
 ArmSmmu4KStatus NativeAdrenoVm::observeCheap()
 {
+    /* One FSR read per table operation: a latched GPU fault is ended before this operation's own proofs read the bank (the table
+     * transaction of a VM that is not detached observes it too). */
+    (void)endBankFault(streams_);
     if(++since_audit_>=64) {
         since_audit_=0;
         ArmSmmu4KStreamResult routes;
-        return ArmSmmu4KObserveStreams(&io_,streams_,context_,&routes);
+        ArmSmmu4KStatus status=ArmSmmu4KObserveStreams(&io_,streams_,context_,&routes);
+        for(unsigned n=0;status==ArmSmmu4KFault && n<3 && endBankFault(streams_);++n) {
+            native_adreno_bank_fault_retries[0]=native_adreno_bank_fault_retries[0]+1;
+            status=ArmSmmu4KObserveStreams(&io_,streams_,context_,&routes);
+        }
+        return status;
     }
     return ArmSmmu4KSuccess;
 }
@@ -135,7 +155,13 @@ IOReturn NativeAdrenoVm::attach(const ArmSmmu4KIo *io,ArmSmmu4KContextConfig *co
         regions_[i].arena->alias_scratch=alias_scratch_;regions_[i].arena->alias_scratch_entries=capacity_;
     }
     attached_=true;
-    ArmSmmu4KStatus status=observe();if(status)return fail(status);
+    (void)endBankFault(streams_);
+    ArmSmmu4KStatus status=observe();
+    for(unsigned n=0;status==ArmSmmu4KFault && n<3 && endBankFault(streams_);++n) {
+        native_adreno_bank_fault_retries[1]=native_adreno_bank_fault_retries[1]+1;
+        status=observe();
+    }
+    if(status)return fail(status);
     return kIOReturnSuccess;
 }
 IOReturn NativeAdrenoVm::detach()
@@ -457,8 +483,13 @@ IOReturn NativeAdrenoVm::invalidateTlb()
     ArmSmmu4KProgramResult r;
     uint64_t offset=0;
     for(const auto &region:regions_)if(region.state && region.state->context_offset)offset=region.state->context_offset;
-    const ArmSmmu4KStatus status=offset?ArmSmmu4KSyncContextTlb(&io_,offset,context_->asid,1,budget_,&r):
+    if(!offset)(void)endBankFault(streams_);   /* the whole invalidation proves the bank (ObserveOwnedContext) around it */
+    ArmSmmu4KStatus status=offset?ArmSmmu4KSyncContextTlb(&io_,offset,context_->asid,1,budget_,&r):
         ArmSmmu4KInvalidateAllOwnedContext(&io_,streams_->bank,context_,budget_,&r);
+    for(unsigned n=0;!offset && status==ArmSmmu4KFault && n<3 && endBankFault(streams_);++n) {
+        native_adreno_bank_fault_retries[0]=native_adreno_bank_fault_retries[0]+1;
+        status=ArmSmmu4KInvalidateAllOwnedContext(&io_,streams_->bank,context_,budget_,&r);
+    }
     return status?fail(status):kIOReturnSuccess;
 }
 IOReturn NativeAdrenoVm::publishMapped()

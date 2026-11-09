@@ -754,6 +754,15 @@ void bhieCheck(volatile uint32_t *m, uint32_t bhie) {
 // what the device wrote into the contexts: combo6 sent our HELLO answer and then saw nothing for 700 s; whether the device's read
 // pointers move (host not consuming) or stand (device silent) decides between a host and a firmware/protocol cause.
 uint64_t gCcaBap, gEcaBap;
+// patches/xnu/t970-wifi-service-mount.patch's stages (5 = mounted and the owner's file visible): the supplicant's launchd cache over
+// /System/Library/xpc and its executable over /usr/libexec. Weak here so a kernel without the patch links; its printf reaches only the
+// USB console, the slot log gets them from the report below.
+extern "C" {
+__attribute__((weak)) volatile int native_gpu_addon5_stage = 0;
+__attribute__((weak)) volatile int native_gpu_addon5_status = -1;
+__attribute__((weak)) volatile int native_gpu_addon6_stage = 0;
+__attribute__((weak)) volatile int native_gpu_addon6_status = -1;
+}
 void ringLog() {
     auto at = [](uint64_t iova) -> const volatile uint8_t * {
         return iova >= gArena.iova && iova + 64 <= gArena.iova + gArena.bytes && gArena.va ? gArena.va + (iova - gArena.iova) : nullptr;
@@ -1006,7 +1015,9 @@ extern "C" void t970_wifi_stack_run(uint64_t barPa) {
     publishMac();
     // t970-wifi-quirks=<bits> bisects the sequence against stage 5: 1 no ath11k sw_reset, 2 no MHI pre-load hook (context registers
     // before BHI), 4 keep MRRS, 8 MSI 4 vectors, 16 no RDDM (no BHIe RX vector doorbell before BHI), 32 keep stage 4's MSI
-    unsigned quirks = 0;
+    // Default 158 (0x9e: 2|4|8|16|128) since combo8b: the coherent path (no write-combine alias, device write-back) reached a working
+    // interface where the alias (30) hung the firmware after "wlan mode req mode 0"; t970-wifi-quirks=<n> still overrides it (0 too).
+    unsigned quirks = 158;
     PE_parse_boot_argn("t970-wifi-quirks", &quirks, sizeof quirks);
     nw_wifi_t970_quirks = int(quirks);
     // t970-wifi-dbg=<mask>: ath11k debug lines printed (debug.h ATH11K_DBG_*); default BOOT|QMI (0x60), as combo1b stalled in QMI
@@ -1128,6 +1139,8 @@ extern "C" void t970_wifi_stack_run(uint64_t barPa) {
             char link[128]; nw_wifi_link_state(link, sizeof(link));
             if (link[0]) t970_wifi_logf(6, "wifi: link %s", link);
             ringLog();
+            t970_wifi_logf(6, "wifi: service mounts xpc %d/%d bin %d/%d", native_gpu_addon5_stage, native_gpu_addon5_status,
+                           native_gpu_addon6_stage, native_gpu_addon6_status);
         }
     }
 }

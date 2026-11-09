@@ -62,9 +62,56 @@ static int append_job(const char **cursor) {
  *cursor=*e?e+1:e;return 0;
 }
 
+// gts7xlwifi t970-sensors bit 128: persist locationd's motion debug messages (subsystem com.apple.locationd.Motion), so the diagnostic
+// export (sheng-diag-export) carries CLIoHidInterface's per-service matching lines ("Check service ref ...", "Checking matching property
+// ...", "Property mismatch!"), which are debug level and otherwise never written. /Library/Preferences is /private/var/preferences on
+// iPadOS, where logd reads Logging/Subsystems overrides. Without the bit the override is removed, so debug persistence never lingers.
+volatile int t970_motion_log_status = -1;
+static int t970_motion_debug_log(proc_t p, uint64_t scratch) {
+ static const char *const dirs[] = {"/private/var/preferences", "/private/var/preferences/Logging",
+                                    "/private/var/preferences/Logging/Subsystems"};
+ static const char path[] = "/private/var/preferences/Logging/Subsystems/com.apple.locationd.Motion.plist";
+ static const char body[] =
+  "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict><key>DEFAULT-OPTIONS</key><dict><key>Level</key><dict>"
+  "<key>Enable</key><string>Debug</string><key>Persist</key><string>Debug</string></dict></dict></dict></plist>\n";
+ unsigned sensors = 0;
+ PE_parse_boot_argn("t970-sensors", &sensors, sizeof(sensors));
+ int32_t result = 0;
+ int error = copyout(path, scratch, sizeof(path));
+ if (error) return error;
+ if (!(sensors & 128)) {
+  struct unlink_args rm = {.path = scratch};
+  error = unlink(p, &rm, &result);
+  return error == ENOENT ? 0 : error;
+ }
+ for (unsigned i = 0; i < sizeof(dirs) / sizeof(dirs[0]); ++i) {
+  if ((error = copyout(dirs[i], scratch, strlen(dirs[i]) + 1))) return error;
+  struct mkdir_args md = {.path = scratch, .mode = 0755};
+  error = mkdir(p, &md, &result);
+  if (error && error != EEXIST) return error;
+ }
+ if ((error = copyout(path, scratch, sizeof(path)))) return error;
+ struct open_args op = {.path = scratch, .flags = O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, .mode = 0644};
+ if ((error = open(p, &op, &result))) return error;
+ const int fd = result;
+ _Static_assert(sizeof(body) - 1 <= 0x1f0, "one piece in the scratch window at +0x200");
+ error = copyout(body, scratch + 0x200, sizeof(body) - 1);
+ if (!error) {
+  struct write_args wr = {.fd = fd, .cbuf = scratch + 0x200, .nbyte = sizeof(body) - 1};
+  user_ssize_t written = 0;
+  error = write(p, &wr, &written);
+  if (!error && written != (user_ssize_t)(sizeof(body) - 1)) error = EIO;
+ }
+ if (!error) {struct fsync_args sync = {.fd = fd}; error = fsync(p, &sync, &result);}
+ struct close_args cl = {.fd = fd};
+ const int closed = sys_close(p, &cl, &result);
+ return error ? error : closed;
+}
+
 int sheng_boot_watchdog_policy(void *process, uint64_t scratch) {
  proc_t p=process;
  int enabled=0,error=0,fd=-1;int32_t result=0;
+ t970_motion_log_status = t970_motion_debug_log(p, scratch);
  PE_parse_boot_argn("sheng-disable-watchdogd",&enabled,sizeof(enabled));
  if(!PE_parse_boot_argn("sheng-disable-jobs",jobs,sizeof(jobs)))jobs[0]=0;jobs[sizeof(jobs)-1]=0;
  int lite=0;PE_parse_boot_argn("sheng-lite",&lite,sizeof(lite));if(lite!=1)lite=0;
@@ -87,8 +134,13 @@ int sheng_boot_watchdog_policy(void *process, uint64_t scratch) {
  // "Updating device orientation from CoreMotion") runs in locationd, which reads the accelerometer service (package/T970Sensors.cpp).
  unsigned sensors=0;PE_parse_boot_argn("t970-sensors",&sensors,sizeof(sensors));
  static const char keep_locationd[]="com.apple.locationd,";
+ // gts7xlwifi t970-bt bit 256 (package/T970Bluetooth.cpp serve mode): the controller is served over UART.SK, so bluetoothd runs
+ // (as UniXNU-sheng 773b232 did for its board). Without that bit there is no controller and the job stays disabled.
+ unsigned bluetooth=0;PE_parse_boot_argn("t970-bt",&bluetooth,sizeof(bluetooth));
+ static const char keep_bluetoothd[]="com.apple.bluetoothd,";
  if(lite)for(const char *c=lite_jobs;*c;) {
   if((sensors&64) && !strncmp(c,keep_locationd,sizeof(keep_locationd)-1)){c+=sizeof(keep_locationd)-1;continue;}
+  if((bluetooth&257)==257 && !strncmp(c,keep_bluetoothd,sizeof(keep_bluetoothd)-1)){c+=sizeof(keep_bluetoothd)-1;continue;}
   if((error=append_job(&c)))return error;
  }
  for(const char *c=jobs;*c;) {if((error=append_job(&c)))return error;}

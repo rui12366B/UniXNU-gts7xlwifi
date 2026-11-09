@@ -32,6 +32,10 @@ volatile uint32_t boot_diag_files, boot_diag_skipped, boot_diag_errors;
 // A root may be a single file: the render server's shader priming state (PrimeShaders.h) in its persistent cache directory, small and
 // the only record of how far priming got (backboardd runs as mobile; the root home is the fallback).
 static const char *const diag_roots[] = {
+  // gts7xlwifi Bluetooth (scripts/build-t970-bluetool.py): bluetoothd's stderr with its os_log mirrored (OS_ACTIVITY_DT_MODE) and the
+  // board's BlueTool, which writes every XPC message and script result there. Small text files, first in line.
+  "/private/var/log/bluetoothd.log",
+  "/private/var/log/unixnu-bluetool.log",
   "/private/var/mobile/Library/Caches/com.apple.backboardd/m2v/prime.log",
   "/private/var/mobile/Library/Caches/com.apple.backboardd/m2v/prime-bad",
   "/private/var/root/Library/Caches/com.apple.backboardd/m2v/prime.log",
@@ -126,11 +130,20 @@ static void scan(const char *path, unsigned depth, uint32_t root, vfs_context_t 
   vnode_put(dir);
 }
 
-// Root order first; inside a root the later name first (log files are numbered upward, so the newest comes first).
+// Root order first; inside a root the later file name first (log files are numbered upward, so the newest comes first). The name, not
+// the whole path: Persist/, Special/ and Signpost/ share one counter, and comparing whole paths put every Special file ahead of every
+// Persist one, so the default-level messages of the current boot (Persist) never fit the budget (gts7xlwifi combo7: 120 MiB of Special,
+// the newest Persist files skipped).
+static const char *leaf(const char *path) {
+  const char *name = path;
+  for (const char *c = path; *c; ++c) if (*c == '/') name = c + 1;
+  return name;
+}
 static int worth(const void *a, const void *b) {
   const struct diag_file *x = a, *y = b;
   if (x->root != y->root) return x->root < y->root ? -1 : 1;
-  return -strcmp(x->path, y->path);
+  const int byName = strcmp(leaf(x->path), leaf(y->path));
+  return byName ? -byName : -strcmp(x->path, y->path);
 }
 
 // The stream's length (without the 16-byte blob header) for at most budget bytes, after scanning the roots; 0 when nothing could be read.

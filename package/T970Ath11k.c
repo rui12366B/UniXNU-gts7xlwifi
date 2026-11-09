@@ -240,3 +240,26 @@ void nw_wifi_stop(void) {
   if (cfg_started) { lx_exit_cfg80211_exit(); cfg_started = false; }
   g_hw = NULL; nw_wifi_buffer_pool_configure(0);
 }
+
+/* int25: combo8 sent "wlan mode req mode 0", then got no HTC READY on CE pipe 2 in 2 s (ath11k_htc_wait_target, also after its
+   own poll of every CE). QMI's mode 4 request then also went unanswered. Called from htc.c (generated copy) at "ctl_resp never came
+   in". It logs the MHI state and execution environment (a firmware assert moves the EE to RDDM or the state to SYS_ERR) and, per
+   copy engine, the host's and the hardware's ring pointers. Only memory the hardware writes is read (the tail of a source ring, the
+   head of a destination ring), never the shadow registers. */
+void t970_htc_dump(struct ath11k_base *ab) {
+  struct ath11k_pci *ab_pci = ath11k_pci_priv(ab);
+  if (ab_pci && ab_pci->mhi_ctrl)
+    ath11k_warn(ab, "t970: mhi state %d ee %d\n", (int)mhi_get_mhi_state(ab_pci->mhi_ctrl), (int)mhi_get_exec_env(ab_pci->mhi_ctrl));
+  for (int i = 0; i < ab->hw_params.ce_count && i < CE_COUNT_MAX; i++) {
+    struct ath11k_ce_pipe *pipe = &ab->ce.ce_pipe[i];
+    struct ath11k_ce_ring *rings[3] = { pipe->src_ring, pipe->dest_ring, pipe->status_ring };
+    u32 v[6] = { 0 };
+    for (int k = 0; k < 3; k++) {
+      if (!rings[k]) { v[2 * k] = v[2 * k + 1] = 0xffffffff; continue; }
+      struct hal_srng *s = &ab->hal.srng_list[rings[k]->hal_ring_id];
+      if (s->ring_dir == HAL_SRNG_DIR_SRC) { v[2 * k] = s->u.src_ring.hp; v[2 * k + 1] = s->u.src_ring.tp_addr ? *(volatile u32 *)s->u.src_ring.tp_addr : 0xeeeeeeee; }
+      else { v[2 * k] = s->u.dst_ring.tp; v[2 * k + 1] = s->u.dst_ring.hp_addr ? *s->u.dst_ring.hp_addr : 0xeeeeeeee; }
+    }
+    ath11k_warn(ab, "t970: ce%d src hp %x tp %x dst hp %x tp %x st tp %x hp %x\n", i, v[0], v[1], v[2], v[3], v[4], v[5]);
+  }
+}

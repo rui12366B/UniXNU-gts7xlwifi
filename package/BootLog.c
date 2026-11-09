@@ -135,6 +135,8 @@ extern volatile uint32_t native_wifi_text_n __attribute__((weak_import));
 extern char native_wifi_note[128][112] __attribute__((weak_import));
 extern volatile uint32_t native_wifi_note_n __attribute__((weak_import));
 extern int native_ufs_extra_fault(uint32_t *) __attribute__((weak_import));
+// Polled UFS transport counters and the age of the command on the wire (ShengUfs RootCommands.h).
+extern int native_ufs_poll_text(char *, size_t) __attribute__((weak_import));
 extern struct {uint32_t stage, scans, frames, beacons, bss_seen; int last_err;} nw_wifi_stats __attribute__((weak_import));
 extern volatile uint64_t nw_wifi_where[4] __attribute__((weak_import));
 extern volatile uint32_t native_dpu_stats[20] __attribute__((weak_import));
@@ -168,7 +170,7 @@ extern volatile int native_gpu_addon4_stage __attribute__((weak_import));
 extern volatile int native_gpu_addon4_status __attribute__((weak_import));
 extern volatile int32_t native_battery_stats[16] __attribute__((weak_import));
 // T970Battery.cpp (periph14): stage, permille, mV, mA, deci-C, flags, full/design mAh, cycles, samples, failures, charger regs.
-extern volatile int32_t t970_battery[13] __attribute__((weak_import));
+extern volatile int32_t t970_battery[28] __attribute__((weak_import));
 // T970Haptics.cpp: stage, last vote rc, pulses, last ms, failed votes, boot test rc, refused requests, rail-off rc.
 extern volatile int32_t t970_haptics[8] __attribute__((weak_import));
 extern volatile int32_t t970_sensors[16] __attribute__((weak_import));
@@ -179,15 +181,19 @@ extern volatile uint32_t native_accel_hid[5] __attribute__((weak_import));
 extern volatile uint32_t native_orient_hid[5] __attribute__((weak_import));
 extern volatile uint32_t native_gyro_hid[5] __attribute__((weak_import));
 extern volatile uint32_t native_hid_gyro_status __attribute__((weak_import));
+extern volatile int t970_motion_log_status __attribute__((weak_import));
 extern volatile int32_t t970_orient[4] __attribute__((weak_import));
 extern volatile uint32_t native_hid_accel_status __attribute__((weak_import));
 extern volatile uint32_t native_hid_orient_status __attribute__((weak_import));
 extern volatile int32_t t970_camera[40] __attribute__((weak_import));
 extern volatile uint8_t t970_camera_thumb[64 * 48] __attribute__((weak_import));
+extern volatile int32_t t970_camera_ae[8] __attribute__((weak_import));
+extern volatile int32_t t970_camera_c5[12] __attribute__((weak_import));
 // T970Bluetooth.cpp: stage/error/ids (see the file's header), and its start-up lines, '|' separated.
 extern volatile int32_t t970_bt[32] __attribute__((weak_import));
 extern char t970_bt_text[1024] __attribute__((weak_import));
 extern volatile uint32_t t970_bt_cp[3] __attribute__((weak_import));
+extern volatile uint32_t t970_bt_sk[8] __attribute__((weak_import));
 extern volatile uint32_t native_swipe_stats[16] __attribute__((weak_import));
 extern volatile int32_t native_touch_extent[4] __attribute__((weak_import));
 extern volatile uint32_t native_adreno_method_stats[20][4] __attribute__((weak_import));
@@ -1576,11 +1582,21 @@ static size_t compose(char *out, size_t cap, uint32_t slot, unsigned now) {
   // send refusals.
   if (&t970_battery && t970_battery[0]) {
     const volatile int32_t *b = t970_battery;
-    char row[180];
-    snprintf(row, sizeof row, "[t970 battery] st %d soc %d.%d%% %dmV %dmA %d.%dC fl %x full %dmAh design %dmAh cyc %d n %d fail %d chg %x kick %d",
+    char row[260];
+    snprintf(row, sizeof row, "[t970 battery] st %d soc %d.%d%% %dmV %dmA %d.%dC fl %x full %dmAh design %dmAh cyc %d n %d fail %d chg %x kick %d"
+             " lim %d/%dmA src %x cnfg %08x wr %d ibus %d",
              (int)b[0], (int)b[1] / 10, (int)b[1] % 10, (int)b[2], (int)b[3], (int)b[4] / 10, (int)(b[4] < 0 ? -b[4] : b[4]) % 10, (unsigned)b[5],
-             (int)b[6], (int)b[7], (int)b[8], (int)b[9], (int)b[10], (unsigned)b[11], (int)b[12]);
+             (int)b[6], (int)b[7], (int)b[8], (int)b[9], (int)b[10], (unsigned)b[11], (int)b[12],
+             (int)b[13], (int)b[14], (unsigned)b[15], (unsigned)b[16], (int)b[17], (int)b[18]);
     at = put(out, at, cap, row, sizeof row);
+    if (b[5] & 1) {   // plugged: input/system power and the PD / AFC negotiation of this plug (T970Battery.cpp)
+      snprintf(row, sizeof row, "[t970 charge] iin %dmA vbyp %dmV isys %dmA vsys %dmV dtl %08x hv %x pdo %08x %08x %08x %08x in %dmA "
+               "vbadc %d req %d",
+               (int)(b[25] & 0xffff), (int)((unsigned)b[25] >> 16), (int)(b[26] & 0xffff), (int)((unsigned)b[26] >> 16), (unsigned)b[27],
+               (unsigned)b[19], (unsigned)b[20], (unsigned)b[21], (unsigned)b[22], (unsigned)b[23], (int)(b[24] & 0xffff),
+               (int)((b[24] >> 16) & 0xff), (int)((unsigned)b[24] >> 24));
+      at = put(out, at, cap, row, sizeof row);
+    }
   }
   if (&t970_bt && t970_bt[0]) {
     const volatile int32_t *b = t970_bt;
@@ -1597,6 +1613,15 @@ static size_t compose(char *out, size_t cap, uint32_t slot, unsigned now) {
       char cprow[96];
       snprintf(cprow, sizeof cprow, "[t970 bt cp] %x n %u t %u", (unsigned)t970_bt_cp[0], (unsigned)t970_bt_cp[1], (unsigned)t970_bt_cp[2]);
       at = put(out, at, cap, cprow, sizeof cprow);
+    }
+    if (&t970_bt_sk && t970_bt_sk[0]) {
+      // serve mode (t970-bt bit 256): state 1 serving / 2 off by request / 3 failed, last power result, pipe activity (power
+      // requests, boot reads, connects, channels), host->controller and controller->host bytes
+      char skrow[128];
+      snprintf(skrow, sizeof skrow, "[t970 bt sk] st %u res %u act %u/%u/%u/%u h2c %u c2h %u", (unsigned)t970_bt_sk[0],
+               (unsigned)t970_bt_sk[1], (unsigned)t970_bt_sk[2], (unsigned)t970_bt_sk[3], (unsigned)t970_bt_sk[4], (unsigned)t970_bt_sk[5],
+               (unsigned)t970_bt_sk[6], (unsigned)t970_bt_sk[7]);
+      at = put(out, at, cap, skrow, sizeof skrow);
     }
     if (&t970_bt_text && t970_bt_text[0]) {
       // the start-up lines in 200-byte rows
@@ -1634,8 +1659,9 @@ static size_t compose(char *out, size_t cap, uint32_t slot, unsigned now) {
              &t970_orient ? (int)t970_orient[2] : 0, &t970_orient ? (int)t970_orient[3] : 0);
     at = put(out, at, cap, row, sizeof row);
     const volatile uint32_t *hg = &native_gyro_hid ? native_gyro_hid : NULL;
-    snprintf(row, sizeof row, "[sensors hid] gyro=%u/%u/%u/%u/%u/%x", &native_hid_gyro_status ? native_hid_gyro_status : 0,
-             hg ? hg[0] : 0, hg ? hg[1] : 0, hg ? hg[2] : 0, hg ? hg[3] : 0, hg ? hg[4] : 0);
+    snprintf(row, sizeof row, "[sensors hid] gyro=%u/%u/%u/%u/%u/%x motionlog=%d", &native_hid_gyro_status ? native_hid_gyro_status : 0,
+             hg ? hg[0] : 0, hg ? hg[1] : 0, hg ? hg[2] : 0, hg ? hg[3] : 0, hg ? hg[4] : 0,
+             &t970_motion_log_status ? t970_motion_log_status : -2);
     at = put(out, at, cap, row, sizeof row);
     if (&t970_sensors_text && t970_sensors_text[0]) {
       snprintf(row, sizeof row, "[sensors] %.95s", t970_sensors_text);
@@ -1669,6 +1695,20 @@ static size_t compose(char *out, size_t cap, uint32_t slot, unsigned now) {
       snprintf(row, sizeof row, "[t970 camera c4] st %d route %x ife %x top|bus %x rdi %x measure %x written %d stats %x ms %d pa %x000 stride %d fault %x",
                (int)c[28], (unsigned)c[29], (unsigned)c[30], (unsigned)c[31], (unsigned)c[32], (unsigned)c[33], (int)c[34],
                (unsigned)c[35], (int)c[36], (unsigned)c[37], (int)c[38], (unsigned)c[39]);
+      at = put(out, at, cap, row, sizeof row);
+    }
+    if (&t970_camera_ae && t970_camera_ae[0]) {   // C4b: exposure/gain, auto exposure (t970-camera bit 128, -exp/-gain)
+      const volatile int32_t *a = t970_camera_ae;
+      snprintf(row, sizeof row, "[t970 camera c4b] st %x def %x final %x gain %x coarse %x means %08x %08x tgt %x",
+               (unsigned)a[0], (unsigned)a[1], (unsigned)a[2], (unsigned)a[3], (unsigned)a[4], (unsigned)a[5], (unsigned)a[6],
+               (unsigned)a[7]);
+      at = put(out, at, cap, row, sizeof row);
+    }
+    if (&t970_camera_c5 && (t970_camera_c5[0] || t970_camera_c5[9])) {   // C5: streaming (bit 256), service (bit 512)
+      const volatile int32_t *v = t970_camera_c5;
+      snprintf(row, sizeof row, "[t970 camera c5] st %x frames %d timeouts %d ms %d fps10 %d exp %x mean %d buf %x sites %08x svc %d uc %08x ae %d",
+               (unsigned)v[0], (int)v[1], (int)v[2], (int)v[3], (int)v[4], (unsigned)v[5], (int)v[6], (unsigned)v[7], (unsigned)v[8],
+               (int)v[9], (unsigned)v[10], (int)v[11]);
       at = put(out, at, cap, row, sizeof row);
     }
     if (c[28] >= 6 && &t970_camera_thumb) {   // the 64x48 thumbnail, one row of 128 hex digits per line (tools/camera-thumb.py)
@@ -1911,6 +1951,11 @@ static size_t compose(char *out, size_t cap, uint32_t slot, unsigned now) {
       }
     }
   }
+  if (&native_ufs_poll_text) {
+    char row[256];
+    const int n = native_ufs_poll_text(row, sizeof row);
+    if (n > 0) at = put(out, at, cap, row, sizeof row);
+  }
   // The sampling profile (BootProgress.c): which processes the interrupts landed in and where, at most 6 KiB of the slot.
   if (&boot_progress_profile_rows) {
     static char profile[6144];
@@ -2140,6 +2185,17 @@ void boot_log_tick(unsigned now) {
       char row[64];
       const int n = snprintf(row, sizeof row, "BLPHASE t=%us phase=%u\n", now, phase);
       if (n > 0 && &qcom_usb_debug_write) qcom_usb_debug_write(row, (size_t)n < sizeof row ? (size_t)n : sizeof row - 1);
+      /* A writer stopped inside a UFS write cannot put its last slot on the medium, so the transport's own view of the
+       * command on the wire and of the gHost.lock holder (ages in us) goes out with the heartbeat (lock-free reader). */
+      if (&native_ufs_poll_text && &qcom_usb_debug_write) {
+        char poll[256];
+        const int m = native_ufs_poll_text(poll, sizeof poll - 1);
+        if (m > 0) {
+          size_t len = (size_t)m < sizeof poll - 1 ? (size_t)m : sizeof poll - 2;
+          poll[len++] = '\n';
+          qcom_usb_debug_write(poll, len);
+        }
+      }
     }
   }
   if (!tick_autoreset || tick_reset_tried) return;

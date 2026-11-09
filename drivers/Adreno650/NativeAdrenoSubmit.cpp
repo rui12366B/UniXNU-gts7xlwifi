@@ -127,6 +127,8 @@ IOReturn NativeAdrenoSubmit::setTableSwitching(unsigned mode,IOReturn (*write)(v
     }
     return kIOReturnSuccess;
 }
+/* gts7xlwifi gpufault2: [0] table switches that found the GPU still busy after 2 s and answered kIOReturnBusy. */
+extern "C" {volatile uint32_t native_t970_usevm_busy[2];}
 /* Makes vm the table the GPU runs for the next submission. Mode 1: once every earlier job has finished, the CPU writes TTBR0 (the bank
  * caches translations per ASID, so the switch needs no TLB operation). Mode 2: the ring's next prologue carries the switch, which the CP
  * runs after every earlier submission. */
@@ -136,7 +138,16 @@ IOReturn NativeAdrenoSubmit::useVm(NativeAdrenoVm *vm,const NativeAdrenoRingCloc
     if(table_mode_==2) {ring(index)->useTable(vm->ttbr0());table_vm_=vm;return kIOReturnSuccess;}
     if(vm==table_vm_)return kIOReturnSuccess;
     if(!clock)return kIOReturnBadArgument;
-    IOReturn status=waitAll(clock,2000000);
+    /* gts7xlwifi gpufault2: the drain waits in 1 ms slices. One 2 s wait never reached noteStall until it had timed out, so a write
+     * pointer the CP missed (the stall the 50 ms kick ends, [gpu unstick] kick=n ended: kick=n) held the switch for the whole 2 s, and its
+     * kIOReturnTimeout failed the submission: Turnip's "submit failed" lost the device, the render server ended itself and SpringBoard
+     * restarted (combo8b at 311 s: method 5 failed once, backboardd SIGTERM, no GPU fault, no hang). Still busy after 2 s: kIOReturnBusy,
+     * the answer the client waits on and submits again after (msm waits for ring space the same way), never a lost device. */
+    /* gpufault3: 250 ms, not 2 s: the caller holds the device lock, which the hangcheck needs to restart a GPU that really stopped
+     * (combo10: three 2 s Busy answers before the restart could run). */
+    IOReturn status=kIOReturnTimeout;
+    for(uint32_t slice=0;slice<250 && status==kIOReturnTimeout;++slice)status=waitAll(clock,1000);
+    if(status==kIOReturnTimeout) {native_t970_usevm_busy[0]=native_t970_usevm_busy[0]+1;return kIOReturnBusy;}
     if(status)return status;
     /* gts7xlwifi: no translation of the incoming ASID may survive from an earlier table that carried it. */
     if(vm->invalidateAsid())return poison();
@@ -888,11 +899,29 @@ IOReturn NativeAdrenoSubmit::recover(NativeAdrenoRestart restart,void *cookie,co
     }
     uint32_t nop=0;
     if(AdrenoPM4Type7(0x10,0,&nop)!=AdrenoPM4Success) {native_adreno_recover_trace[0]=4;return poison();}   /* CP_NOP */
+    /* gts7xlwifi gpufault3: the table switch of the replay. useVm (mode 1) drains every outstanding job first, and here every job still
+     * waiting for its own replay is outstanding: the drain could never end, so each replay that met another process's job timed out and
+     * poisoned the submission object (combo10: restart done at 138 s, then every open refused "mount fail stage 2 e00002c2", backboardd
+     * gone for good, the screen frozen). Only what this replay already put on the ring has to finish before TTBR0 changes. */
+    auto replayVm=[&](NativeAdrenoVm *to,uint32_t done)->IOReturn {
+        if(table_mode_!=1 || to==table_vm_)return useVm(to,clock);
+        if(done>hung) {
+            NativeAdrenoRingFence reached=NativeAdrenoRingFenceTimeout;uint32_t observed=0;
+            for(unsigned slice=0;slice<2000 && reached==NativeAdrenoRingFenceTimeout;++slice)reached=ring(0)->wait(done,clock,1000,&observed);
+            if(reached!=NativeAdrenoRingFenceComplete)return reached==NativeAdrenoRingFenceTimeout?kIOReturnTimeout:kIOReturnIOError;
+        }
+        if(to->invalidateAsid())return kIOReturnIOError;
+        if(write_table_(table_cookie_,to->ttbr0()))return kIOReturnIOError;
+        native_adreno_table_switches[1]=native_adreno_table_switches[1]+1;
+        table_vm_=to;return kIOReturnSuccess;
+    };
     for(uint32_t next=hung+1;next && next<=last;++next) {
         Job *job=find(next);
         NativeAdrenoVm *vm=job && job->vm?job->vm:vm_;
-        const bool run=job && !vm->unusable() && job->word_count;
-        status=useVm(vm,clock);
+        /* A job whose table was poisoned since (its process failed) runs as a CP_NOP on the table already installed: its fence still comes. */
+        if(vm!=vm_ && vm->poisoned())vm=table_vm_;
+        const bool run=job && (job->vm?job->vm:vm_)==vm && !vm->unusable() && job->word_count;
+        status=replayVm(vm,next-1);
         if(status) {native_adreno_recover_trace[0]=5;native_adreno_recover_trace[1]=uint32_t(status);return poison();}
         ring(0)->useContext(job?job->context:0);
         uint32_t value=0;

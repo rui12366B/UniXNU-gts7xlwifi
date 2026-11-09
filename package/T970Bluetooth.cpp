@@ -9,8 +9,9 @@
 //     16 CTS, 17 RTS, 18 TX, 19 RX, function 1 (qup6); QUP0 wrapper @0x9c0000, apps-SMMU stream 0x5a3
 //   GCC (gcc-kona.c): SE6 RCG 0x17730 (CMD, CFG +4, M +8, N +c, D +10), branch halt 0x1772c, vote 0x52008 bits 16 (s6), 6/7 (m/s
 //     AHB), 8/9 (core/core_2x)
-// SM8250's SE is older than QUP 2.5, so the UART oversamples 32 times (Linux qcom_geni_serial halves it only from 2.5): the RCG runs
-// at 96 MHz (GPLL0 even 300 MHz, M/N 8/25), which gives 3 Mbaud with divider 1 and 115200 with divider 26 (0.16 % off).
+// QUP0 reads hardware version 0x20050000 (2.5), so the UART oversamples 16 times (Linux qcom_geni_serial halves 32 from 2.5; see
+// oversampling()): the RCG runs at 96 MHz (GPLL0 even 300 MHz, M/N 8/25), which gives 3 Mbaud with divider 2 and 115200 with divider
+// 52 (0.16 % off).
 // The engine is polled (the worker services GENI every millisecond while powered) and the serial clock is never gated, so no IRQ or
 // wake GPIO is needed for this first round. DMA buffers: cached pages below 4 GiB behind a bypass-emulation context bank (as
 // T970Audio.cpp routes stream 0x1801), cache maintenance as sheng does.
@@ -21,7 +22,11 @@
 // HCI_Reset + Read Local Version again); 2 stop after the ROM readback (no rampatch/NVM, no baud change); 4 GENI internal loopback
 // self-test before BT_EN; 8 (GPIO 21) is now a no-op: secure pin; 16 stay at 115200 for the download; 32 leave the
 // controller powered after the test (default: power it off again, then the worker exits); 64 step mode (the first 48 accesses each
-// wait 2.6 s after their checkpoint, so the UFS boot log names the access about to run); 128 mirror each checkpoint to the USB console.
+// wait 2.6 s after their checkpoint, so the UFS boot log names the access about to run); 128 mirror each checkpoint to the USB console
+// (until the controller is ready); 256 serve: after a good start-up keep the controller powered and register UART.SK
+// (kern_control + Skywalk "com.apple.uart.sk.bluetooth") and kern.qbt_boot/qbt_power_on/qbt_firmware for bluetoothd and BlueTool;
+// H4 bytes then move between the socket and the UART, and power requests from the pipe switch the controller (upstream's sheng
+// worker loop, polled every millisecond). t970_bt_sk[8] (BootLog row [t970 bt sk]) counts the pipe's activity.
 // t970-bt-stop=<n>: stop before 1 anything (after the wake), 2 the first read (mapped), 3 GCC (TLMM read), 4 rails (one GCC read),
 // 5 DMA/SMMU, 6 the first SMMU access, 7 pin writes/clocks, 8 the first SE6 access, 9 BT_EN; err = 1000 + n.
 // t970-bt-en=<gpio> (default 76), t970-bt-delay=<s> (default 60: after Wi-Fi stage 6 claims its SMMU bank at ~43 s).
@@ -38,6 +43,7 @@
 #include <stdarg.h>
 #include "qbt.h"
 #include "qbt_geni.h"
+#include "qbt_transport.h"   // UART.SK pipe to bluetoothd (generated T970 copy of src/qbt_transport.c)
 extern "C" {
 #include "qbt_internal.h"   // qbt_command: the core's own command/reply wait, for HCI_Reset and Read Local Version
 }
@@ -64,6 +70,10 @@ volatile int32_t t970_bt[32];
 // reg, 5 QUP0 wrapper, 6 RPMh rail index, 7 phase: 1 start delay, 2 Wi-Fi wait, 3 mapping), [1] accesses so far, [2] uptime ms.
 // A CPU stuck on an access leaves [0] naming it.
 volatile uint32_t t970_bt_cp[3];
+// Serve mode (bit 256): [0] state (0 off, 1 serving, 2 powered off by request, 3 failed), [1] last power result (errno),
+// [2..5] qbt_transport_activity (power requests, boot-state reads, control connects, channel requests), [6] host->controller bytes
+// (low 32), [7] controller->host bytes (low 32).
+volatile uint32_t t970_bt_sk[8];
 // The start-up log lines (btqca's own and this file's), '|' separated, for BootLog.
 char t970_bt_text[1024];
 volatile uint32_t t970_bt_text_length;
@@ -94,8 +104,10 @@ bool mapWindow(Window &w, uint64_t base, uint64_t size) {
 }
 void barrier() {__asm__ volatile("dsb sy" ::: "memory");}
 unsigned gMode;   // t970-bt bits, read by cp() before the worker's state exists
+bool gQuiet;   // set once the controller is ready: no more USB mirroring or step pauses for the serve loop's accesses
 unsigned gStepMs = 2600;   // t970-bt-step=<ms>: step-mode pause (2600 > one BootLog period names the exact access; 300 ~ within 7)
 void cp(uint32_t block, uint32_t offset) {
+    if (gQuiet) return;   // serve loop: no per-access record (combo11a: ~10,600 a second), the last start-up checkpoint stays
     t970_bt_cp[0] = block << 28 | (offset & 0x0fffffff); t970_bt_cp[1] = t970_bt_cp[1] + 1;
     uint64_t ns; absolutetime_to_nanoseconds(mach_absolute_time(), &ns); t970_bt_cp[2] = uint32_t(ns / 1000000);
     barrier();
@@ -132,7 +144,8 @@ struct Bt {
     struct qbt *core;
     unsigned mode, btEn, delay;
     uint8_t address[6];
-    bool powered, loopback;
+    bool powered, loopback, serving, service, addressDone, addressStable;
+    uint32_t powerRequest;   // 1 on, 2 off: from the UART.SK pipe, taken by the worker
     uint8_t loop_rx[16]; unsigned loop_length;
 } bt;
 
@@ -237,9 +250,13 @@ int quiesce() {
         IODelay(50);
     }
 }
+// Linux qcom_geni_serial: the UART oversamples 32 times, halved to 16 from QUP_SE_VERSION_2_5 (0x20050000) on. combo8 read the QUP0
+// wrapper as 0x20050000, so this SM8250 is 2.5 and samples 16 times; the old fixed 32 ran the line at twice the baud (6 garbage bytes,
+// 2 line errors, no HCI answer). At 96 MHz: 115200 -> divider 52 (0.16 % off), 3 Mbaud -> divider 2 (exact).
+unsigned oversampling() {return uint32_t(t970_bt[3]) >= 0x20050000u ? 16 : 32;}
 int setRate(void *, uint32_t baud) {
     int e = quiesce(); if (e) {note("rate %u: quiesce %d", baud, e); return e;}
-    e = qbt_geni_set_rate(&bt.geni, baud, kSourceHz, 32);
+    e = qbt_geni_set_rate(&bt.geni, baud, kSourceHz, oversampling());
     if (!e) e = qbt_geni_resume(&bt.geni);
     note("rate %u -> %d", baud, e);
     if (!e) t970_bt[9] = int32_t(baud);
@@ -264,7 +281,8 @@ int firmware(void *, const char *name, const uint8_t **data, size_t *size) {
     return 0;
 }
 void firmwarePut(void *, const uint8_t *data, size_t size) {if (data) IOFreeData(const_cast<uint8_t *>(data), size);}
-size_t hostRx(void *, const uint8_t *, size_t n) {return n;}   // no host stack yet: forwarded packets are consumed
+// Host-bound H4 packets: to the UART.SK pipe when serving (it retains what it cannot take), else consumed.
+size_t hostRx(void *, const uint8_t *bytes, size_t n) {return bt.serving ? qbt_transport_receive(bytes, uint32_t(n)) : n;}
 void log(void *, int level, const char *line) {if (level <= 6) note("%s", line);}
 
 // ---- SMMU: route stream 0x5a3 to a bypass-emulation bank (S2CR then SMR; the bank SCTLR off, CBAR S1_TRANS_S2_BYPASS) ----
@@ -396,7 +414,8 @@ int prepareEngine() {
         rx[i] = {bt.bytes + 4096 + i * QBT_GENI_RX_SIZE, bt.pa[1 + i / 2] + (i & 1) * QBT_GENI_RX_SIZE, QBT_GENI_RX_SIZE};
     struct qbt_geni_ops ops = {nullptr, urd, uwr, dmaBarrier, dmaSync, nowNs, irqMask, wakeWorker, rxBytes};
     int e = qbt_geni_prepare(&bt.geni, &ops, &tx, rx); if (e) return e;
-    e = qbt_geni_set_rate(&bt.geni, 115200, kSourceHz, 32); if (e) return e;
+    e = qbt_geni_set_rate(&bt.geni, 115200, kSourceHz, oversampling()); if (e) return e;
+    note("uart oversampling %u (QUP %x)", oversampling(), unsigned(t970_bt[3]));
     t970_bt[9] = 115200;
     return 0;
 }
@@ -419,6 +438,8 @@ int loopbackCheck() {
 }
 bool deriveAddress() {
     // A stable locally administered address from the chip id (as sheng): no identifier in the source, nothing written to the device.
+    // Derived once: serve mode publishes it before userland starts (publishAddress) and the controller gets the same one later.
+    if (bt.addressDone) return bt.addressStable;
     IORegistryEntry *chosen = IORegistryEntry::fromPath("/chosen", gIODTPlane);
     OSData *id = chosen ? OSDynamicCast(OSData, chosen->getProperty("unique-chip-id")) : nullptr;
     uint64_t hash = 0xcbf29ce484222325ULL;
@@ -433,7 +454,31 @@ bool deriveAddress() {
     if (!nonzero) hash ^= mach_absolute_time();   // still valid for a bring-up test, just not stable
     for (unsigned i = 0; i < 6; ++i) bt.address[i] = uint8_t(hash >> (i * 8));
     bt.address[0] = (bt.address[0] & 0xfe) | 2;
+    bt.addressDone = true; bt.addressStable = nonzero;
     return nonzero;
+}
+// Serve mode, before userland: MobileGestalt's Bluetooth capability (libMobileGestalt 21H461, the answer at 0x1a0226750) is true only
+// when a Bluetooth address resolves to 6 bytes that are not all zero: /chosen mac-address-bluetooth0 first, else local-mac-address of
+// the registry entry named "bluetooth". Without it Settings has no Bluetooth row at all (combo11a). Both are set here, in display
+// (network) order, the same address qbt_boot gives the controller. The /arm-io/bluetooth node comes from the board DTS; its
+// transport-encoding/transport-speed are set here as well.
+void publishAddress() {
+    const bool stable = deriveAddress();
+    if (IORegistryEntry *chosen = IORegistryEntry::fromPath("/chosen", gIODTPlane)) {
+        if (!chosen->getProperty("mac-address-bluetooth0")) chosen->setProperty("mac-address-bluetooth0", bt.address, 6);
+        chosen->release();
+    }
+    IORegistryEntry *node = IORegistryEntry::fromPath("/arm-io/bluetooth", gIODTPlane);
+    if (node) {
+        if (!node->getProperty("local-mac-address")) node->setProperty("local-mac-address", bt.address, 6);
+        // upstream's runtime interface: four-byte little-endian H4 encoding and UART speed (the DTS converter drops unknown cells)
+        uint32_t encoding = 1, speed = (bt.mode & 16) ? 115200 : 3000000;
+        if (!node->getProperty("transport-encoding")) node->setProperty("transport-encoding", &encoding, sizeof encoding);
+        if (!node->getProperty("transport-speed")) node->setProperty("transport-speed", &speed, sizeof speed);
+        node->release();
+    }
+    note("published address %02x:%02x:%02x:%02x:%02x:%02x%s; /arm-io/bluetooth %s", bt.address[0], bt.address[1], bt.address[2],
+         bt.address[3], bt.address[4], bt.address[5], stable ? "" : " (not stable)", node ? "found" : "missing");
 }
 void hexReply(const char *what, int e, const uint8_t *r, size_t n) {
     char hex[3 * 20 + 1] = {}; size_t at = 0;
@@ -478,6 +523,7 @@ void stats() {
     stamp();
 }
 int dmaBuffers() {
+    if (bt.dma) return 0;   // kept across power cycles of the serve loop
     // 3 pages: TX (4096), RX 0/1, RX 2/3. Each buffer stays inside one page. combo5: a below-4 GiB mask got -ENOMEM (no such
     // contiguous pages on this map), so use the 40-bit mask the Wi-Fi/GPU drivers use; GENI DMA takes PTR_L/PTR_H (64-bit) and the
     // SID 0x5a3 bank is bypass, so the PA goes straight to the bus.
@@ -573,33 +619,15 @@ void powerOff() {
     // the SMMU route, the DMA pages and the RCG stay: the engine is stopped, so nothing reaches the pages again
 }
 
-void worker(void *, wait_result_t) {
-    thread_set_thread_name(current_thread(), "t970-bt");
-    stage(kStageArgs);
-    // Wi-Fi starts at 20 s and owns WLAN_EN and the PCIe side; wait for it to settle (or fail) before touching the shared chip.
-    cp(7, 1);
-    IOSleep(bt.delay * 1000);
-    cp(7, 2);
-    note("start delay over (%u s)", bt.delay);
-    if (&t970_wifi_stats) {
-        for (unsigned i = 0; i < 300; ++i) {
-            const int32_t s = int32_t(t970_wifi_stats[0]);
-            if (s == 0 || s < 0 || s >= 20) break;
-            IOSleep(100);
-        }
-        note("wifi stage %d", int(int32_t(t970_wifi_stats[0])));
-    }
-    if (gate(1)) return;                                    // woke, before any allocation or mapping
-    struct qbt_platform ops = {nullptr, allocate, release, nowNs, writeUart, drained, setRate, flow, clockVote, pump, waitUntil,
-                               hostRx, firmware, firmwarePut, log};
-    bt.core = qbt_create(&ops);
-    if (!bt.core) {t970_bt[1] = -ENOMEM; stage(-kStageArgs); return;}
+// Power on, ROM readback, btqca start-up, patched readback. 0 = ready; 1 = stopped at a t970-bt-stop gate; else the error, with the
+// controller powered off again and the failing stage recorded negative.
+int bringUp() {
     int e = powerOn();
-    if (e == 1) return;                                     // stopped at a gate: no stats (they read TLMM)
+    if (e == 1) return 1;                                   // stopped at a gate: no stats (they read TLMM)
     if (e) {
         const int at = t970_bt[0];
         t970_bt[1] = e; stats(); note("power on failed at stage %d: %d", at, e);
-        powerOff(); stage(-at); return;
+        powerOff(); stage(-at); return e;
     }
     // ROM first, at 115200, on every run: a version readback that needs no firmware files.
     e = hciIdentify("rom");
@@ -623,10 +651,115 @@ void worker(void *, wait_result_t) {
         const int at = t970_bt[0];
         note("failed after stage %d: %d (geni state %d err %d irq %x/%x/%x/%x)", at, e, int(bt.geni.state), bt.geni.error,
              bt.geni.fault_irq[0], bt.geni.fault_irq[1], bt.geni.fault_irq[2], bt.geni.fault_irq[3]);
-        powerOff(); stage(-at); return;
+        powerOff(); stage(-at); return e;
     }
     stage(kStageReady);
     note("controller ready");
+    return 0;
+}
+
+// ---- serve mode (bit 256): the UART.SK pipe to bluetoothd ----
+void transportWake(void *) {}                               // polled worker: it looks at the pipe every millisecond anyway
+int requestPower(void *, bool enabled) {
+    uint32_t expected = 0;
+    return __atomic_compare_exchange_n(&bt.powerRequest, &expected, enabled ? 1u : 2u, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE) ? 0 : EBUSY;
+}
+void skStats() {
+    for (unsigned i = 0; i < 4; ++i) t970_bt_sk[2 + i] = qbt_transport_activity[i];
+    struct qbt_stats s; qbt_get_stats(bt.core, &s);
+    t970_bt_sk[6] = uint32_t(s.host_bytes); t970_bt_sk[7] = uint32_t(s.delivered_bytes);
+}
+void powerResult(bool enabled, int e) {
+    struct qbt_info info; qbt_get_info(bt.core, &info);
+    const int error = e < 0 ? -e : e;
+    qbt_transport_power_result(enabled, error, info.firmware[0] ? info.firmware : "htbtfw20.tlv", info.baud ? info.baud : 3000000);
+    t970_bt_sk[0] = error ? 3 : enabled ? 1 : 2; t970_bt_sk[1] = uint32_t(error);
+    skStats();
+    note("uart.sk power %d result %d baud %u", int(enabled), e, info.baud);
+}
+void serve() {
+    struct qbt_transport_ops transport = {nullptr, transportWake, requestPower};
+    int e = qbt_transport_init(&transport);
+    if (e) {note("uart.sk init %d", e); t970_bt_sk[0] = 3; t970_bt_sk[1] = uint32_t(e); return;}
+    bt.serving = true; gQuiet = true;
+    powerResult(true, 0);                                   // registers com.apple.uart.sk.bluetooth and answers kern.qbt_boot
+    uint64_t health = nowNs(nullptr) + 1000000000ULL, closeAt = 0;
+    for (;;) {
+        const uint32_t command = __atomic_exchange_n(&bt.powerRequest, 0u, __ATOMIC_ACQ_REL);
+        if (command == 1) {
+            e = bt.powered ? 0 : bringUp();                 // a running controller is kept as it is (upstream)
+            if (e == 1) e = -EIO;
+            powerResult(true, e);
+        } else if (command == 2) {
+            if (bt.powered) {powerOff(); stage(kStageOff);}
+            bt.service = false; closeAt = 0;
+            powerResult(false, 0);
+        }
+        if (bt.powered) {
+            pump(nullptr);
+            const bool active = qbt_transport_active();
+            if (active != bt.service) {
+                qbt_set_service(bt.core, active); bt.service = active;
+                closeAt = active ? 0 : nowNs(nullptr) + 500000000ULL;
+                note("uart.sk %s", active ? "connected" : "closed");
+            }
+            uint8_t tx[2048];
+            size_t room = qbt_transmit_capacity(bt.core); if (room > sizeof tx) room = sizeof tx;
+            if (room) {const uint32_t n = qbt_transport_tx_take(tx, uint32_t(room)); if (n && qbt_transmit(bt.core, tx, n)) note("uart.sk tx %u dropped", n);}
+            qbt_step(bt.core);
+            struct qbt_info info; qbt_get_info(bt.core, &info);
+            if (info.state == 3 || bt.geni.state == QBT_GENI_FAILED || (closeAt && nowNs(nullptr) >= closeAt)) {
+                const int error = info.state == 3 ? info.error : bt.geni.state == QBT_GENI_FAILED ? bt.geni.error : 0;
+                powerOff(); stage(kStageOff); bt.service = false; closeAt = 0;
+                powerResult(false, error);
+            }
+        }
+        const uint64_t t = nowNs(nullptr);
+        if (t >= health) {skStats(); if (bt.powered) stats(); health = t + 1000000000ULL;}
+        // Adaptive poll (no IRQ line is attached yet; combo11a's fixed 1 ms poll cost ~1000 wakeups a second for the whole boot):
+        //  - nobody on the pipe, or the controller off: 50 ms. A connect or power request is seen within one round, and an idle
+        //    controller sends nothing; anything it does send waits in the 4 x 2048-byte RX ring and behind RFR flow control.
+        //  - host connected, bytes moved in the last 100 ms: 1 ms (the ring holds ~27 ms at 3 Mbaud), with up to 8 immediate rounds
+        //    while the core has work due.
+        //  - host connected but idle: 8 ms.
+        static uint64_t lastBytes, lastActive;
+        static unsigned busy;
+        if (bt.powered) {
+            struct qbt_stats st; qbt_get_stats(bt.core, &st);
+            const uint64_t bytes = st.tx_bytes + st.rx_bytes;
+            if (bytes != lastBytes) {lastBytes = bytes; lastActive = t;}
+        }
+        const bool traffic = bt.powered && bt.service && t - lastActive < 100000000ULL;
+        if (traffic && qbt_deadline(bt.core) <= t && ++busy < 8) continue;
+        busy = 0;
+        IOSleep(!bt.powered || !bt.service ? 50 : traffic ? 1 : 8);
+    }
+}
+
+void worker(void *, wait_result_t) {
+    thread_set_thread_name(current_thread(), "t970-bt");
+    stage(kStageArgs);
+    // Wi-Fi starts at 20 s and owns WLAN_EN and the PCIe side; wait for it to settle (or fail) before touching the shared chip.
+    cp(7, 1);
+    IOSleep(bt.delay * 1000);
+    cp(7, 2);
+    note("start delay over (%u s)", bt.delay);
+    if (&t970_wifi_stats) {
+        for (unsigned i = 0; i < 300; ++i) {
+            const int32_t s = int32_t(t970_wifi_stats[0]);
+            if (s == 0 || s < 0 || s >= 20) break;
+            IOSleep(100);
+        }
+        note("wifi stage %d", int(int32_t(t970_wifi_stats[0])));
+    }
+    if (gate(1)) return;                                    // woke, before any allocation or mapping
+    struct qbt_platform ops = {nullptr, allocate, release, nowNs, writeUart, drained, setRate, flow, clockVote, pump, waitUntil,
+                               hostRx, firmware, firmwarePut, log};
+    bt.core = qbt_create(&ops);
+    if (!bt.core) {t970_bt[1] = -ENOMEM; stage(-kStageArgs); return;}
+    int e = bringUp();
+    if (e) return;                                          // a gate (1) or a failure, already recorded
+    if (bt.mode & 256) {serve(); return;}
     if (bt.mode & 32) {
         // keep it powered and serviced (IBS sleep indications etc.) until a host stack exists
         for (;;) {pump(nullptr); qbt_step(bt.core); IOSleep(5); static unsigned n; if (!(++n % 200)) stats();}
@@ -651,6 +784,7 @@ extern "C" void t970_bluetooth_start(void) {
     if (bt.btEn > 179 || securePin(bt.btEn)) bt.btEn = 76;   // 21 (the cnss bt-en) is a secure pin: never touched
     if (bt.delay > 120) bt.delay = 120;
     t970_bt[0] = kStageArgs;
+    if ((mode & 256)) publishAddress();                     // before launchd: MobileGestalt reads it for the Settings row
     thread_t thread = nullptr;
     if (kernel_thread_start(worker, nullptr, &thread) == KERN_SUCCESS) thread_deallocate(thread);
     else t970_bt[0] = -kStageArgs;

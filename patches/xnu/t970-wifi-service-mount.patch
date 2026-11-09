@@ -1,0 +1,223 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7214,6 +7214,13 @@
+ volatile int native_gpu_addon3_status = -1;
+ volatile int native_gpu_addon4_stage = 0;
+ volatile int native_gpu_addon4_status = -1;
++volatile int native_gpu_addon5_stage = 0;
++volatile int native_gpu_addon5_status = -1;
++/* gts7xlwifi: wifi-xpc/ files the addon install wrote this boot (see the Wi-Fi service mount below). */
++static int t970_wifi_xpc_written;
++/* gts7xlwifi: the install's last successfully written file this boot, for the full sync after the loop. */
++static char t970_addon_last_written[192];
++volatile int t970_addon_full_sync = -1;   /* -1 nothing written, else the F_FULLFSYNC result */
+ static void
+ native_gpu_addon_mount(proc_t p, user_addr_t scratch, user_addr_t offset, const char *source, size_t source_size,
+     const char *point, size_t point_size, const char *visible, const char *own, volatile int *stage, volatile int *status)
+@@ -7315,6 +7322,10 @@
+ volatile int native_gpu_addon_same = 0;
+ volatile int native_gpu_addon_failed = 0;
+ volatile int native_gpu_addon_error = 0;
++/* gts7xlwifi (t970-wifi-service-mount.patch): why the install rewrites a file, for the "ngpu addon: wrote" line: 0 new (no file),
++ * 1 attributes unreadable, 2 size (old size in t970_addon_why_value), 3 mode (old mode), 4 content (first differing offset). */
++static int t970_addon_why;
++static uint64_t t970_addon_why_value;
+ static int
+ native_gpu_addon_equal(vnode_t vp, const uint8_t *data, uint64_t size, uint32_t mode, vfs_context_t ctx)
+ {
+@@ -7322,9 +7333,21 @@
+ 	VATTR_INIT(&va);
+ 	VATTR_WANTED(&va, va_data_size);
+ 	VATTR_WANTED(&va, va_mode);
+-	if (vnode_getattr(vp, &va, ctx) || va.va_data_size != size || (va.va_mode & 07777) != mode) {
++	if (vnode_getattr(vp, &va, ctx)) {
++		t970_addon_why = 1;
++		t970_addon_why_value = 0;
+ 		return 0;
+ 	}
++	if (va.va_data_size != size) {
++		t970_addon_why = 2;
++		t970_addon_why_value = va.va_data_size;
++		return 0;
++	}
++	if ((va.va_mode & 07777) != mode) {
++		t970_addon_why = 3;
++		t970_addon_why_value = va.va_mode & 07777;
++		return 0;
++	}
+ 	const uint32_t chunk = 1024 * 1024;
+ 	uint8_t *buffer = kalloc_data(chunk, Z_WAITOK);
+ 	if (!buffer) {
+@@ -7336,6 +7359,12 @@
+ 		if (vn_rdwr(UIO_READ, vp, (caddr_t)buffer, length, (off_t)at, UIO_SYSSPACE, IO_NOAUTH, vfs_context_ucred(ctx), &resid,
+ 		    vfs_context_proc(ctx)) || resid || memcmp(buffer, data + at, length)) {
+ 			equal = 0;
++			int first = 0;
++			while (first < length - resid && buffer[first] == data[at + first]) {
++				first++;
++			}
++			t970_addon_why = 4;
++			t970_addon_why_value = at + (uint64_t)first;
+ 		}
+ 	}
+ 	kfree_data(buffer, chunk);
+@@ -7345,6 +7374,8 @@
+ native_gpu_addon_write(const char *path, const uint8_t *data, uint64_t size, uint32_t mode, vfs_context_t ctx)
+ {
+ 	vnode_t vp = NULLVP;
++	t970_addon_why = 0;
++	t970_addon_why_value = 0;
+ 	int error = vnode_open(path, FREAD | O_NOFOLLOW, 0, 0, &vp, ctx);
+ 	if (!error) {
+ 		int equal = native_gpu_addon_equal(vp, data, size, mode, ctx);
+@@ -7491,9 +7522,29 @@
+ 			native_gpu_addon_error = error;
+ 		} else {
+ 			native_gpu_addon_written++;
++			strlcpy(t970_addon_last_written, path, sizeof(t970_addon_last_written));
++			static const char *const t970_why[5] = {"new", "attributes", "size was", "mode was", "content at"};
++			printf("ngpu addon: wrote %s (%llu bytes): %s %llx\n", name, (unsigned long long)size, t970_why[t970_addon_why],
++			    (unsigned long long)t970_addon_why_value);
++			if (!strncmp(name, "wifi-xpc/", 9)) {
++				t970_wifi_xpc_written++;
++			}
+ 		}
+ 		at += (packed + 7) & ~7ULL;
+ 	}
++	/* gts7xlwifi: each file gets only VNOP_FSYNC(MNT_WAIT), which leaves APFS without a checkpoint; after a hang and a hard reset the
++	 * Data volume came back without them and the next boot wrote them again (combo13 -> 13a). Once per boot, and only when something
++	 * was written, F_FULLFSYNC (fsync, journal flush, DKIOCSYNCHRONIZE, as fcntl does it) on the last written file commits them. */
++	if (native_gpu_addon_written > 0 && t970_addon_last_written[0]) {
++		vnode_t synced = NULLVP;
++		int sync_error = vnode_lookup(t970_addon_last_written, VNODE_LOOKUP_NOFOLLOW, &synced, ctx);
++		if (!sync_error) {
++			sync_error = VNOP_IOCTL(synced, F_FULLFSYNC, (caddr_t)NULL, 0, ctx);
++			vnode_put(synced);
++		}
++		t970_addon_full_sync = sync_error;
++		printf("t970 addon: full sync rc=%d (%d written, last %s)\n", sync_error, native_gpu_addon_written, t970_addon_last_written);
++	}
+ }
+ /* The OS cryptex where iPadOS looks for it. The root volume's entries for cryptex content are links into /System/Cryptexes/OS, which
+  * leads to /private/preboot/Cryptexes/OS; WebKit's processes are ExtensionKit extensions reached that way
+@@ -7683,6 +7734,27 @@
+ 	native_gpu_addon_mount(p, scratch, 0xa00, audio_source, sizeof(audio_source), audio_point, sizeof(audio_point),
+ 	    "/System/Library/Audio/Plug-Ins/HAL/BuiltinAudioPlugin.driver", "/System/Library/Audio/Plug-Ins/HAL/T970Audio.driver/Info.plist",
+ 	    &native_gpu_addon4_stage, &native_gpu_addon4_status);
++	/* gts7xlwifi: the Wi-Fi supplicant service (UniXNU-sheng sheng-wifi-launchd-cache.patch, for iPadOS 17), with t970-wifi-svc=1.
++	 * launchd starts the jobs of /System/Library/xpc/launchd.plist after launchd_cache_loader checked launchd.plist.sig and found its
++	 * CDHash in the trust cache; the addon's wifi-xpc/ carries the 21H461 cache with org.unixnu.wifi.supplicant added and its own
++	 * detached signature, nothing else. The executable stays in /private/var/ngpu/wifi-bin; the Sandbox exec check that refuses xpcproxy
++	 * there (combo12) is skipped for that one path in security/mac_vfs.c.
++	 * The mount waits for a boot in which the install did not rewrite wifi-xpc/: combo11, 13a, 14 and 15 mounted the cache right after
++	 * the install had rewritten it, then PID 1 hung in a UFS write that never completed (or launchd got no cache at all, 13a); the
++	 * stock cache is used for that one boot. Stage 6 = deferred (status = files written). */
++	uint32_t wifi_service = 0;
++	if (PE_parse_boot_argn("t970-wifi-svc", &wifi_service, sizeof(wifi_service)) && (wifi_service & 1)) {
++		if (t970_wifi_xpc_written) {
++			native_gpu_addon5_stage = 6;
++			native_gpu_addon5_status = t970_wifi_xpc_written;
++			printf("t970 wifi: wifi-xpc written this boot (%d files): launchd cache mount deferred to the next boot\n", t970_wifi_xpc_written);
++		} else {
++			static const char wifi_xpc_source[] = "/private/var/ngpu/wifi-xpc", wifi_xpc_point[] = "/System/Library/xpc";
++			native_gpu_addon_mount(p, scratch, 0xa00, wifi_xpc_source, sizeof(wifi_xpc_source), wifi_xpc_point, sizeof(wifi_xpc_point),
++			    "/System/Library/xpc/extensions.plist", "/System/Library/xpc/launchd.plist", &native_gpu_addon5_stage, &native_gpu_addon5_status);
++			printf("t970 wifi: launchd cache mount stage %d status %d\n", native_gpu_addon5_stage, native_gpu_addon5_status);
++		}
++	}
+ 	native_cryptex_os_view(p, scratch);
+ 	native_gestalt_cache_drop(p, scratch);
+ 	native_ls_store_drop(p, scratch);
+--- a/security/mac_vfs.c
++++ b/security/mac_vfs.c
+@@ -81,6 +81,7 @@
+ #include <sys/reason.h>
+ #include <sys/uio_internal.h>
+ #include <sys/vnode_internal.h>
++#include <pexpert/pexpert.h>
+ #include <sys/kdebug.h>
+ 
+ 
+@@ -1225,6 +1226,36 @@
+ 
+ 	/* Falsify results instead of returning error? */
+ 	return error;
++}
++
++/* gts7xlwifi (patches/xnu/t970-wifi-service-mount.patch): with t970-wifi-svc=1 the board's owner services at exactly these Data paths
++ * (addon wifi-bin/ and bt-bin/) are exempt from the Sandbox policy's exec check, which the platform profile applies to xpcproxy
++ * ("process-exec*", combo12), and from AMFI's launch constraints (security/mac_process.c; combo15b "Launch Constraint Violation ...
++ * Constraint not matched": an owner-trusted binary has no platform constraint category). AMFI still checks their signatures against
++ * the owner trust cache; any other path, or no boot argument, is unchanged. */
++int t970_service_exec_exempt(struct vnode *vp);
++int
++t970_service_exec_exempt(struct vnode *vp)
++{
++	static const char *const exempt[] = {
++		"/private/var/ngpu/wifi-bin/unixnu-wpa_supplicant",
++		"/private/var/ngpu/bt-bin/BlueTool",
++	};
++	uint32_t service = 0;
++	char path[64];
++	int length = sizeof(path);
++	if (!vp || !PE_parse_boot_argn("t970-wifi-svc", &service, sizeof(service)) || !(service & 1)) {
++		return 0;
++	}
++	if (vn_getpath(vp, path, &length) != 0) {
++		return 0;
++	}
++	for (size_t i = 0; i < sizeof(exempt) / sizeof(exempt[0]); i++) {
++		if (strcmp(path, exempt[i]) == 0) {
++			return 1;
++		}
++	}
++	return 0;
+ }
+ 
+ int
+@@ -1233,6 +1264,7 @@
+ {
+ 	kauth_cred_t cred;
+ 	int error = 0;
++	const int t970_exempt = t970_service_exec_exempt(vp);
+ 
+ #if SECURITY_MAC_CHECK_ENFORCE
+ 	/* 21167099 - only check if we allow write */
+@@ -1260,7 +1292,7 @@
+ 			}
+ 
+ 			mpo_vnode_check_exec_t *hook = mpc->mpc_ops->mpo_vnode_check_exec;
+-			if (hook == NULL) {
++			if (hook == NULL || (t970_exempt && strcmp(mpc->mpc_name, "Sandbox") == 0)) {
+ 				continue;
+ 			}
+ 
+@@ -1281,7 +1313,7 @@
+ 				}
+ 
+ 				mpo_vnode_check_exec_t *hook = mpc->mpc_ops->mpo_vnode_check_exec;
+-				if (hook == NULL) {
++				if (hook == NULL || (t970_exempt && strcmp(mpc->mpc_name, "Sandbox") == 0)) {
+ 					continue;
+ 				}
+ 
+--- a/security/mac_process.c
++++ b/security/mac_process.c
+@@ -898,11 +898,17 @@
+ // entry are valid: the constraint category of an owner or cryptex binary is not the platform one. The original release
+ // AMFI ignores its own amfi_* boot arguments, so the check is cleared here when the board asks for it. An option of the
+ // instrumented board only: the boot argument, not the default, decides.
++int t970_service_exec_exempt(struct vnode *vp);   /* security/mac_vfs.c */
++
+ int
+ mac_proc_check_launch_constraints(proc_t curp, struct image_params *imgp, os_reason_t *reasonp)
+ {
+ 	uint32_t skip = 0;
+ 	if (PE_parse_boot_argn("sheng-no-lc", &skip, sizeof(skip)) && skip != 0) {
++		return 0;
++	}
++	/* gts7xlwifi: the board's owner services at their exact Data paths (security/mac_vfs.c t970_service_exec_exempt, t970-wifi-svc=1). */
++	if (t970_service_exec_exempt(imgp->ip_vp)) {
+ 		return 0;
+ 	}
+ 	char *fatal_failure_desc = NULL;

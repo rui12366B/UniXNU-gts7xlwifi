@@ -195,3 +195,156 @@ combo4. BAD_TRE came back at chunk 5, decoded:
 - Event ring 1: EOT events, len 0x34, for ch 21 and ch 20 alternately.
 - The ch 20 context rp read 0x1_00000001. The host sets rp = rbase and never writes it again, so this value comes from the device.
 int24 adds to the BAD_TRE path the channel context's 11 words and TREs i-3..i+1, and splits `wifi: rings` into two rows.
+
+### combo8 (int24), 2026-11-08: past BDF, stuck at HTC
+
+No BAD_TRE this boot. BDF, M3, firmware init/start, wlan cfg and "wlan mode req mode 0" all completed (722–732 ms). The
+"htc service 'Control' … ready" line is ath11k_htc_init setting up endpoint 0 locally; the wait that failed is ath11k_htc_wait_target,
+the target's HTC READY message on CE pipe 2. It never came, not even after ath11k's own poll of every CE. Then "qmi wlan mode req mode 4"
+also went unanswered for 10 s, so the firmware stopped answering QMI too. That points to a firmware hang or crash after mode 0, not
+to a host that misses one message. No SMMU fault (fsr 400). MHI event rings fully consumed (er1 rp a00a0300, wp a00a02f0).
+int25 logs, at that timeout, the MHI state and EE plus every CE ring's host and hardware pointers (t970_htc_dump). Running with
+t970-wifi-dbg=0x8864 (BOOT|QMI|HTC|HAL|CE) also shows the shadow-register ring set-up and any CE traffic.
+
+### combo8b (int24, quirks 158), 2026-11-08: interface up, no scan
+
+On the coherent path (quirk 128: no write-combine alias, device write-back) the firmware got past HTC/WMI, the regulatory set-up ran
+(6 GHz disabled by the custom regd, as expected), en0 came up, the cfg80211 ready callback ran ([wifi-nw] stage 4) and wifid
+opened the interface. Over the whole boot wifid issued only state/capability gets, `kCurrentNetwork` (103) polls and a few set types
+the bridge refuses (383 len 4104, 419 len 136, 470, 473). It sent no scan request (type 10/86) and never set power (19). The station
+reports IDLE, so the power get answers "on".
+
+Two separate gaps:
+1. wifid never asks for a scan. int25 logs the first 48 bytes of each refused set type once (`wifi-net: refused <type> …`); if
+   383 is 21H461's scan request, the bridge needs it.
+2. Even when asked, nw_wifi_scan only queues NW_CONTROL_SCAN_REQUEST for the userspace supplicant (`unixnu-wpa_supplicant` over
+   `org.unixnu.wifi.control`, Ath12kWifi `userspace/driver_sheng.c`). That is still not built or packaged for this board (item 5 of
+   the list above), so a scan would just time out with no results.
+
+int25 also makes quirks 158 the default when `t970-wifi-quirks` is absent.
+
+### Supplicant service (int26), 2026-11-08
+
+Open item 5 is now scripted, untested on the device:
+- `scripts/build-t970-wifi-service.py --os-root <extracted 21H461 OS> [--addon IN --addon-out OUT --trust IN --trust-out OUT]`
+  builds Ath12kWifi's wpa_supplicant 2.12 with the native backend for arm64e iOS 17.0 (`out/wpa-ios17`) and signs it ad hoc as
+  `org.unixnu.wifi.supplicant` (no-container entitlement).
+- The launchd job `org.unixnu.wifi.supplicant` (`/usr/libexec/unixnu-wpa_supplicant -Dsheng -ien0 -c/private/var/ngpu/etc/wifi/wpa_supplicant.conf -q`,
+  root, KeepAlive, log /var/log/unixnu-wifi.log) is merged into the OS's `System/Library/xpc/launchd.plist`, keeping all 561 original
+  jobs, and the result gets its own detached signature (UniXNU `build-boot-runtime.py` merge/sign).
+- The addon gains `wifi-bin/unixnu-wpa_supplicant` (0755), `etc/wifi/wpa_supplicant.conf` and `xpc/launchd.plist{,.sig}`. Both
+  CDHashes go into one new trust module.
+- `patches/xnu/t970-wifi-service-mount.patch` (applied after t970-audio-addon-mount.patch) union-mounts /private/var/ngpu/xpc over
+  /System/Library/xpc and /private/var/ngpu/wifi-bin over /usr/libexec, only with `t970-wifi-svc=1`. 21H461's
+  launchd_cache_loader checks launchd.plist.sig and looks the CDHash up in the trust cache ("cdhash: %s is not in trust cache"). A
+  cache that fails that check stops every job, so without the boot argument the stock cache stays in place.
+The merged cache is built from Apple's file at staging time and is never committed.
+
+combo10b (int26, t970-wifi-svc=1), 2026-11-08: launchd_cache_loader accepted the merged cache (`status=0`, so the signature and trust
+are good), the boot reached SpringBoard and launchd started org.unixnu.wifi.supplicant once. xpcproxy then exited with 78
+(EX_CONFIG, `XPC org.unixnu.wifi.supplicant n=1 st=4e00`) before the supplicant ran. That build was arm64e, with ptrauth ABI subtype
+USR00 from the iOS 27 SDK, while every binary this board's addon already runs (adrenoprobed, T970Audio) is plain arm64. int27 builds the
+supplicant as arm64-apple-ios17.0 and cleans out/wpa-ios17 first (make would keep the arm64e objects). The board's 30 s Wi-Fi
+report adds `wifi: service mounts xpc S/E bin S/E` (stage 5 / status 0 = mounted), because the kernel printf reaches only the USB
+console.
+
+combo11 (int27 on the GPU session's bosafe addon/trust, t970-wifi-svc=1), 2026-11-09: both mounts reported stage 5, then PID 1 spun in
+the kernel and launchd spawned nothing, not even launchd_cache_loader. The bosafe files check out: the launchd cache's detached signature
+verifies, its CDHash and the executable's are in trust module 4, and the addon's binary matches. So the cache check was not the
+failure. combo10b's xpcproxy exit 78 fits a missing /usr/libexec executable as well as the arm64e ABI. int28 (patch revised):
+t970-wifi-svc is a bit mask, 1 = the launchd cache over /System/Library/xpc (combo10b showed it works), 2 = the /usr/libexec mount
+(off unless asked). The job runs /private/var/ngpu/wifi-bin/unixnu-wpa_supplicant directly, as adrenoprobed runs from
+/private/var/ngpu/bin. `--drop-cdhash` replaces an earlier Wi-Fi trust module instead of stacking another one.
+
+combo12 (int28, t970-wifi-svc=1), 2026-11-09: the boot is fine and launchd runs the job, but every ~3 s "System Policy: xpcproxy deny(1)
+process-exec* /private/var/ngpu/wifi-bin/unixnu-wpa_supplicant": the platform policy lets xpcproxy exec launchd jobs only from system
+paths (the reason sheng mounted over /usr/libexec). int29: t970-wifi-svc bit 1 (2) now union-mounts wifi-bin/ over /usr/libexec/dtrace
+(21H461: four DTrace scripts, referenced by no launchd job) rather than all of /usr/libexec, which hung PID 1 in combo11. The job runs
+/usr/libexec/dtrace/unixnu-wpa_supplicant; boot with t970-wifi-svc=3.
+Also seen: "Protobox: configd deny(1) iokit-open-service IO80211Interface" (configd's sandbox and our interface's class name), which
+matters for IP configuration once the supplicant joins a network.
+
+combo13 (int29, t970-wifi-svc=3), 2026-11-09: hung with colour stripes after both mounts reported stage 5. The same build also carried
+other sessions' changes; the bisect boot is t970-wifi-svc=1. int30 avoids a second mount: the signed executable also goes into the
+addon's xpc/, and the job runs /System/Library/xpc/unixnu-wpa_supplicant, so the launchd-cache mount alone (t970-wifi-svc=1, fine in
+combo10b and combo12) puts it at a system path.
+
+combo13a/combo14, 2026-11-09:
+- combo13a: launchd aborted with "No service cache" (21H461 /sbin/launchd at base 0x100ee6000: offset 0x184f8 loads that string
+  and 0x3dc34 calls abort_with_reason). launchd_cache_loader passed it no cache.
+- combo14 (wifi5, the executable inside the xpc union): PID 1 stayed in the kernel before its first spawn, as in combo11. Symbolicated
+  against mach.development.bcm2837.unstripped, the samples sit in polled UFS writes through the file cache (hostWrite4k / pollUfsTransfer
+  / delay_for_interval under memory_object_control_uiomove), after the addon install and the mount had finished.
+Both boots that hung this way (combo11, combo14) had an executable inside a union over a system directory. int31 avoids that entirely:
+- the addon carries only launchd.plist + .sig, in a fresh `wifi-xpc/` directory (combo14 left an executable in /private/var/ngpu/xpc,
+  and the addon install never deletes); the old xpc/ entries are removed from the addon;
+- the job runs /private/var/ngpu/wifi-bin/unixnu-wpa_supplicant, and patches/xnu/t970-wifi-service-mount.patch now also skips the
+  Sandbox policy's exec check (security/mac_vfs.c) for exactly that path with t970-wifi-svc=1. AMFI and the other policies still check
+  it. The /usr/libexec/dtrace option is gone.
+The launchd cache is byte-identical to wifi3's (CDHash 5c0f8047…), the one combo12 booted with.
+
+combo15 (int31, wifi-xpc holding only the cache), 2026-11-09: PID 1 hung the same way, so an executable in the union was not the trigger.
+In every hang (combo11, 14, 15) and in combo13a's "No service cache", the addon install had rewritten the cache files in the same boot
+just before the union mount exposed them. The PID-1 samples are a polled UFS write that never completes, and the slot writer, on the same
+path, died with it. int32 (patch revised): the install counts the wifi-xpc/ files it wrote, and when there are any, the mount is
+deferred to the next boot. That boot uses the stock cache: stage 6, status = files written, kernel printf "launchd cache mount
+deferred". Test-compiled: kern_exec.c and mac_vfs.c, patched and unpatched, -fsyntax-only with the kernel's defines and the
+xnu-work/EXPORT_HDRS include paths; no new warnings.
+
+combo15a→15b, 2026-11-09: on the same int31 kernel, a boot that rewrote the addon (15a, svc off) followed by an svc=1 boot that wrote
+none of the cache files booted with the mount at stage 5. That confirms the defer of int32. The supplicant then passed the Sandbox exec
+check, but AMFI refused it: "Launch Constraint Violation ... c[8]p[1]m[1]e[6] (Constraint not matched)", relaunched every ~3 s. An
+owner-trusted binary has no platform constraint category. UniXNU's zzyc-owner-skip-launch-constraints.patch is in the kernel, but only as
+the global boot argument sheng-no-lc=1. int33: t970_service_exec_exempt() in mac_vfs.c (exact paths
+/private/var/ngpu/wifi-bin/unixnu-wpa_supplicant and /private/var/ngpu/bt-bin/BlueTool, t970-wifi-svc=1) now also returns early from
+mac_proc_check_launch_constraints. The patch is rebased on the live xnu-work (it carries the MG marker bump) and test-compiled with
+-Wall -Wmissing-prototypes.
+
+int34, 2026-11-09 (asked for by the UFS investigation): after the addon install's loop, if it wrote anything, one F_FULLFSYNC
+(VNOP_IOCTL, as fcntl does it) on the last written file commits an APFS checkpoint, logged as "t970 addon: full sync rc=N (W written,
+last PATH)" and kept in t970_addon_full_sync (-1 = nothing written). combo17 hung in PID 1's UFS writes even with the mount deferred, so the
+deferral does not prevent that hang; whatever causes it, the files the install already wrote must survive the hard reset that follows.
+
+combo19 (int34 + the UFS fix, t970-wifi-svc=1), 2026-11-09: scans work in iPadOS ("[wifi-nw] scans=6 networks=41"). Joining failed with
+"unsupported association layout: 856 bytes" (type 20 → EINVAL). Decoded from 21H461's IO80211.framework `__performAssociation`
+(SystemOS cryptex dyld cache, extracted with Xcode's dsc_extractor): the request is 0x358 bytes, version 1, request base sp+0x230; u16
+mode/auth_lower/auth_upper at 4/6/8; SSID length 0x0c, SSID 0x10; BSSID 0x30 (4+2 bytes); key version 0x38; key length 0x3c; cipher 0x40
+(10 for a passphrase, whose bytes are copied to 0x48); PMK at 0x1d8 with its length 32 at 0x1d4. That is the legacy (592-byte) network
+prefix with a longer tail. int35: T970WifiNet.cpp accepts it as assoc_request17. It logs mode, auth, SSID, part of the BSSID, key
+length and cipher, never the key. Since 856 is not the 24A446 656-byte form, the legacy association-done event (no payload) applies.
+
+combo20 (int35), 2026-11-09: the join works. The 21H461 request carried mode 2, auth lower 1 / upper 8, cipher 6 (a 32-byte PMK
+derived by wifid); the supplicant authenticated and associated, DHCP gave an address and frames flow both ways. But there is no Wi-Fi icon
+and Safari loads nothing. Seen: "Protobox: configd/wifid deny(1) iokit-open-service IO80211Interface", and every Apple80211 request after
+the 300th went unlogged, so wifid's post-join queries were invisible. int36:
+- NativeSandboxGrantProcess on the IO80211Interface (configd, wifid, wifianalyticsd, WiFiCloudAssetsClient, locationd, sharingd,
+  mDNSResponder) and on the controller (configd, wifid). These use the board's IOUserClient grant. The interface still offers no user
+  client (the ioctl path serves everything), so the open now fails with "unsupported" rather than a sandbox denial;
+- the 60 requests after a successful join are logged whatever the request cap;
+- the traffic line counts DNS (UDP 53) and TCP SYN, SYN-ACK and RST per direction, and logs the first few of each with addresses, so
+  "connections answered" and "no route" can be told apart.
+
+combo21 (int36), 2026-11-09: IP works. DNS gets answers and TCP to Apple's servers completes the SYN/SYN-ACK handshake, and the
+sandbox denials are gone. Still no Wi-Fi icon, and wifid polled APPLE80211_IOC_AUTH_TYPE (2) every 1-4 s. After the join it read SSID,
+BSSID, channel, state 4 (RUN), RSSI, noise and the current network, all answered. The auth answer was the problem: a constant upper
+0x10 (from the 24A446 port), while 21H461's own join request said upper 8 (WPA2-PSK; lower 1, open system). int37 answers AUTH_TYPE
+with the lower/upper of the last join request (all three layouts, and the unattended join as 1/8). In the 21H461 IO80211 `__eventRead`,
+socket events carry an interface-name check at +0x18, the event code at +0x14 and the payload at +0x28, so the 32-byte link event is
+delivered. IO80211 also has an IOUserClient event path (Apple80211EventMonitoringInitIOUC); our interface offers no user client, which
+leaves wifid on the socket path. Still refused: gets 346 (1032 bytes) and 387 (37 bytes), set 471.
+
+combo22 (int37), 2026-11-09: the unified log was decoded from the diag export with tv3.py, extended to resolve shared-cache formats
+(offset + 0x180000000 into the dsc_extractor output) and uuid-relative ones (configd's IPConfiguration bundle).
+- wifid: "Completed Apple80211AssociateAsync (0)", "Manually Joined", "Set password", "Updated associated network ... wpa2-personal",
+  "{LINK+} link up". wifid does consider the join complete.
+- wifid: "{IP-} IPv4 Primary interface is (null)" throughout, and configd's IPMonitor never reported an IPv4 primary ("network changed"
+  only for DNS/Proxy). configd set "SetInterfaceRank(en0) = Never" at start, then wifid set Default repeatedly.
+- IPConfiguration: DHCP "publish success { IPv4, DNS, DHCP }", MANUAL "publish success { IPv4 }", but also "failed to create
+  /var/db/dhcpclient/leases, Read-only file system (30)".
+- wifid: "SCPreferencesCommitChanges() Failed!", "_CFPropertyListCreateBinaryData: CFPropertyListWrite ... 3851", "Fetched 0 known
+  networks from the plist", WiFiSecurity -25300. The network and its password are not persisted.
+- wifid: "Apple80211SetProperty: failed to set IO80211InterfaceIPConfigurationBusy / IPV6Params / AppState / HeartBeat / RoamParams /
+  WifidEnumeratedInfra / ExternelPowerState / BSP_CommandParams: errno 102" = our refused set 383 (an XML plist {key: value}).
+int38: set 383 accepted, with each key logged once; sets 470/471/473 accepted; SIOCGIFDEVMTU answered (1500, 1280..1500).
+The EROFS and SCPreferences failures say parts of /private/var are not writable for configd and wifid; that is a Data-volume or
+mount matter outside the Wi-Fi driver.

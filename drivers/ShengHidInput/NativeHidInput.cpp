@@ -295,6 +295,7 @@ class NativeHidInput : public IOHIDDevice {
             if(driver && (touchEnabled || touchOnly))edge::install(driver);
             if(driver && accelOnly)stampMotion(driver,3,0x73,native_accel_hid);
             if(driver && gyroOnly)stampMotion(driver,9,0x7a,native_gyro_hid);
+            if(driver && orientOnly)stampBuiltIn(driver,native_orient_hid);
         }
         return eventDriverFound;
     }
@@ -305,6 +306,14 @@ class NativeHidInput : public IOHIDDevice {
     // PrimaryUsagePage/PrimaryUsage), keeping 0x20/0x73 in the pairs as well. Same approach as native_hid_live_checkpoint for the
     // digitizer. Once, when the driver is first seen.
     // The gyro the same way: backboardd's gyro matcher is 0xff00/9 builtIn:YES, locationd's CLGyro looks up {0xff00, 9}.
+    // The device orientation service keeps its Sensor page identity (0x20/0x8a is the pair locationd's CLOrientationNotifier looks up),
+    // but locationd's CLIoHidInterface also requires its matching properties, {Built-In = true} for this device (a constant dictionary
+    // in the donor locationd). Without it every lookup logged "Service for device with usage pair {32, 138} is not ready" (combo8b).
+    static void stampBuiltIn(IORegistryEntry *driver,volatile uint32_t *stats) {
+        IORegistryEntry *targets[2]={driver,driver->getParentEntry(gIOServicePlane)};
+        for(IORegistryEntry *t:targets)if(t)t->setProperty("Built-In",kOSBooleanTrue);
+        stats[0]=2;   // 2: event driver found and stamped
+    }
     static void stampMotion(IORegistryEntry *driver,unsigned appleUsage,unsigned sensorUsage,volatile uint32_t *stats) {
         OSArray *pairs=OSArray::withCapacity(2);
         const unsigned values[2][2]={{0xff00,appleUsage},{0x20,sensorUsage}};
@@ -407,6 +416,11 @@ public:
         // and backboardd takes each as the whole touch set, so no two fingers are ever down together for UIKit (no pinch, no
         // multi-finger or system gestures).
         if(touchOnly||touchEnabled){setProperty("Built-In",true);setProperty("DisplayIntegrated",true);setProperty("DigitizerCollectionDispatch",true);}
+        // The motion devices are Built-In from the start: IOHIDInterface copies Built-In from the device and IOHIDEventService from the
+        // interface when they start, so the event driver already carries it when it registers. locationd's CLIoHidInterface matches a
+        // service once, when the new-service notification arrives; the later stamp (stampBuiltIn/stampMotion, ~1 s after) came too late
+        // and {32, 138} stayed "not ready" for the whole of combo9.
+        if(accelOnly||orientOnly||gyroOnly)setProperty("Built-In",true);
         if(!IOHIDDevice::start(provider))return false;
         timer=IOTimerEventSource::timerEventSource(this,tick);
         if(!timer || inputLoop->addEventSource(timer)!=kIOReturnSuccess) {

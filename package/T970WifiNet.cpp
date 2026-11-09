@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
-// gts7xlwifi: UniXNU-sheng package/WifiNet.cpp (5d51e87, verified there on iPadOS 17.7.11 21H461: scan, WPA2, DHCP, traffic) with the
+// gts7xlwifi: UniXNU-sheng package/WifiNet.cpp (5d51e87, verified there on iPadOS 27 24A446: scan, WPA2, DHCP, traffic; 21H461 adds the
+// 856-byte association request below) with the
 // board's names (t970_wifi_*, T970WLAN, t970-wifi-aj) and without BootUiTraceProbe's input-stall report. Nothing else differs: the
 // Apple80211 request and event layouts are the ones that build reads on 21H461.
 // The WiFi module's network side: the Ethernet interface the system routes through, the registry entries by which the wireless daemon and
@@ -102,6 +103,13 @@ struct assoc_request27 {                                                        
   uint32_t version; uint16_t mode, unused; uint32_t auth_lower, auth_upper;
   assoc_parameters network; uint8_t rest[0x290 - 0x8c];
 };
+// 21H461 IO80211 __performAssociation (shared cache, IO80211.framework): an 856-byte request, version 1, with the legacy header and
+// network prefix at 0x0c (u16 mode/auth_lower/auth_upper at 4/6/8, SSID length 0x0c, SSID 0x10, BSSID 0x30, key length 0x3c, cipher
+// 0x40 (10 = passphrase), key 0x48); its tail is longer (PMK and its length at 0x1d8/0x1d4, more fields up to 0x358).
+struct assoc_request17 {                                                                          // 856 bytes
+  uint32_t version; uint16_t mode, auth_lower, auth_upper, unused;
+  assoc_parameters network; uint8_t rest[0x358 - 0x88];
+};
 struct link_event { uint8_t down, unused0[3]; int32_t rssi; uint16_t snr, noise; uint8_t unused1[4]; uint8_t involuntary, unused2[3]; uint32_t reason, subreason; uint8_t unused3[4]; };
 static_assert(sizeof(scan_result) == 1164 && __builtin_offsetof(scan_result, ssid_length) == 0x60 && __builtin_offsetof(scan_result, age_ms) == 0x84 &&
               __builtin_offsetof(scan_result, elements) == 0x8c, "scan result layout");
@@ -110,6 +118,8 @@ static_assert(sizeof(assoc_parameters) == 0x7c && __builtin_offsetof(assoc_param
               __builtin_offsetof(assoc_parameters, key_cipher) == 0x34, "association network prefix");
 static_assert(sizeof(assoc_request) == 592 && __builtin_offsetof(assoc_request, network) == 0x0c, "legacy association layout");
 static_assert(sizeof(assoc_request27) == 656 && __builtin_offsetof(assoc_request27, network) == 0x10, "24A446 association layout");
+static_assert(sizeof(assoc_request17) == 856 && __builtin_offsetof(assoc_request17, network) == 0x0c &&
+              __builtin_offsetof(assoc_request17, network) + __builtin_offsetof(assoc_parameters, key) == 0x48, "21H461 association layout");
 static_assert(sizeof(channels_list) == 4824, "channel list layout");
 static_assert(sizeof(link_event) == 32, "link event layout");
 
@@ -129,6 +139,8 @@ uint32_t gRxPendingPackets, gRxPendingBytes, gRxBatches, gRxLargestBatch;
 struct { unsigned count, kicks, cleared, longest; bool kicked; } gStall;   // input thread stalls (check_input)   // frames handed to the stack, refused ones and the last refusal
 int gAssocResult = kAssocPending;
 bool gAssocModern;
+uint32_t gAuthLower = 1, gAuthUpper;   // the authentication of the last join request, answered back for APPLE80211_IOC_AUTH_TYPE
+unsigned gPostJoinLog;   // the next requests after a join are logged whatever the request cap (combo20: no icon after joining)
 bool gJoinPending;
 unsigned gScanCursor, gScanning;
 bool gUserJoin;   // the wireless daemon joined, left or switched the radio itself: the unattended test join steps aside
@@ -224,6 +236,7 @@ void on_connect_done(int result) {
   gAssocResult = result == NW_RES_OK ? kAssocOk : result == NW_RES_BAD_KEY ? kAssocBadKey : result == NW_RES_TIMEOUT ? kAssocTimeout : kAssocFailed;
   const bool pending = __atomic_exchange_n(&gJoinPending, false, __ATOMIC_ACQ_REL);
   log(6, "wifi-net: join finished: module result %d", result);
+  if (result == NW_RES_OK) gPostJoinLog = 60;
   post_link(result == NW_RES_OK);
   if (pending) post_association_result();
   if (result == NW_RES_OK) {
@@ -246,7 +259,7 @@ void on_link_update(const nw_wifi_status *status) {
 }
 // What the address configuration exchanges, as it crosses the interface: DHCP messages (type, transaction, offered address) and ARP, the first
 // ones of each direction, and per-kind counts for the traffic line.
-struct Kinds { uint32_t arp, ip4, dhcp, ip6, other; } gKindsIn, gKindsOut;
+struct Kinds { uint32_t arp, ip4, dhcp, ip6, other, dns, tcp, syn, synack, rst; } gKindsIn, gKindsOut;
 void note_frame(const uint8_t *e, size_t n, bool out) {
   Kinds &k = out ? gKindsOut : gKindsIn; const unsigned type = n >= 14 ? (e[12] << 8 | e[13]) : 0; const char *dir = out ? "out" : "in";
   if (type == 0x0806) {
@@ -256,8 +269,24 @@ void note_frame(const uint8_t *e, size_t n, bool out) {
   if (type == 0x86dd) { k.ip6++; return; }
   if (type != 0x0800 || n < 34) { k.other++; return; }
   k.ip4++; const uint8_t *ip = e + 14; const unsigned ihl = (ip[0] & 15) * 4;
+  // TCP handshakes and resets, so the traffic line shows whether connections get answered (combo20: Safari loaded nothing)
+  if (ip[9] == 6 && n >= 14 + ihl + 14) {
+    const uint8_t flags = ip[ihl + 13]; k.tcp++;
+    if ((flags & 0x12) == 0x02) k.syn++; else if ((flags & 0x12) == 0x12) k.synack++;
+    if (flags & 0x04) k.rst++;
+    static unsigned shown[2];
+    if ((flags & 0x02) && shown[out]++ < 8)
+      log(6, "wifi-net: tcp %s %s %u.%u.%u.%u:%u -> %u.%u.%u.%u:%u", dir, (flags & 0x10) ? "syn-ack" : "syn", ip[12], ip[13], ip[14], ip[15],
+          ip[ihl] << 8 | ip[ihl + 1], ip[16], ip[17], ip[18], ip[19], ip[ihl + 2] << 8 | ip[ihl + 3]);
+    return;
+  }
   if (ip[9] != 17 || n < 14 + ihl + 8) return;
   const uint8_t *udp = ip + ihl; const unsigned sp = udp[0] << 8 | udp[1], dp = udp[2] << 8 | udp[3];
+  if (sp == 53 || dp == 53) {
+    k.dns++; static unsigned shown[2];
+    if (shown[out]++ < 6) log(6, "wifi-net: dns %s %u.%u.%u.%u -> %u.%u.%u.%u", dir, ip[12], ip[13], ip[14], ip[15], ip[16], ip[17], ip[18], ip[19]);
+    return;
+  }
   if (!((sp == 67 || sp == 68) && (dp == 67 || dp == 68))) return;
   k.dhcp++; const uint8_t *b = udp + 8; const size_t bl = n - (b - e); unsigned msg = 0;
   for (size_t o = 240; bl >= 240 && o + 2 <= bl && b[o] != 255; o += b[o] ? 2 + b[o + 1] : 1) if (b[o] == 53 && o + 2 < bl) { msg = b[o + 2]; break; }
@@ -409,19 +438,31 @@ int copy_in(const apple80211req &rq, void *dst, size_t size) {
 }
 int copy_association(const apple80211req &rq, assoc_parameters &out) {
   // Select only an observed wire layout, never infer it from credential contents.
-  if (rq.req_len != sizeof(assoc_request) && rq.req_len != sizeof(assoc_request27)) {
+  if (rq.req_len != sizeof(assoc_request) && rq.req_len != sizeof(assoc_request27) && rq.req_len != sizeof(assoc_request17)) {
     log(4, "wifi-net: unsupported association layout: %u bytes", rq.req_len);
     return EINVAL;
   }
-  union { assoc_request legacy; assoc_request27 current; } wire;
+  union { assoc_request legacy; assoc_request27 current; assoc_request17 ios17; } wire;
   int error = copy_in(rq, &wire, sizeof wire);
   if (!error) {
-    if (rq.req_len == sizeof(assoc_request27)) {
+    if (rq.req_len == sizeof(assoc_request17)) {
+      if (wire.ios17.version != 1) error = EINVAL;
+      else {
+        out = wire.ios17.network; gAuthLower = wire.ios17.auth_lower; gAuthUpper = wire.ios17.auth_upper;
+        const assoc_parameters &n = wire.ios17.network;
+        // never the key itself: its length and cipher only
+        log(6, "wifi-net: join 21H461 mode %u auth lower %x upper %x ssid %u '%.*s' bssid %02x:%02x:%02x:..:%02x key len %u cipher %u",
+            wire.ios17.mode, wire.ios17.auth_lower, wire.ios17.auth_upper, n.ssid_length, int(n.ssid_length <= 32 ? n.ssid_length : 0), n.ssid,
+            n.bssid[0], n.bssid[1], n.bssid[2], n.bssid[5], n.key_length, n.key_cipher);
+      }
+    } else if (rq.req_len == sizeof(assoc_request27)) {
       if (wire.current.version != 1) error = EINVAL;
-      else { out = wire.current.network; log(6, "wifi-net: join auth lower %x upper %x", wire.current.auth_lower, wire.current.auth_upper); }
+      else { out = wire.current.network; gAuthLower = wire.current.auth_lower; gAuthUpper = wire.current.auth_upper;
+             log(6, "wifi-net: join auth lower %x upper %x", wire.current.auth_lower, wire.current.auth_upper); }
     } else {
       if (wire.legacy.version != 1) error = EINVAL;
-      else { out = wire.legacy.network; log(6, "wifi-net: join auth lower %x upper %x", wire.legacy.auth_lower, wire.legacy.auth_upper); }
+      else { out = wire.legacy.network; gAuthLower = wire.legacy.auth_lower; gAuthUpper = wire.legacy.auth_upper;
+             log(6, "wifi-net: join auth lower %x upper %x", wire.legacy.auth_lower, wire.legacy.auth_upper); }
     }
   }
   memset(&wire, 0, sizeof wire);
@@ -509,6 +550,24 @@ int apple80211(bool set, apple80211req &rq) {
       return r ? EINVAL : 0; }
     case kDisassociate: case kDeauth: log(6, "wifi-net: leave"); disconnect_user(); return 0;
     case kScanCacheClear: case kLocale: case kCountryCode: case kPowerSave: case kAuthType: case kCipherKey: return 0;
+    // 21H461 Apple80211SetProperty: u32 1, u32 length, an XML property list {key: value}. combo22's wifid reported every refusal
+    // ("failed to set IO80211InterfaceIPConfigurationBusy / IPV6Params / AppState / HeartBeat / RoamParams / WifidEnumeratedInfra /
+    // ExternelPowerState / BSP_CommandParams: errno 102"). The interface keeps no such state, so they are accepted; each key's first set
+    // is logged. 470, 471 and 473 are one-byte or four-byte switches (low-power and similar modes) and are accepted the same way.
+    case 383: {
+      uint8_t head[512]; if (copy_in(rq, head, sizeof head)) return EFAULT;
+      char key[64] = "?";
+      for (size_t i = 8; i + 6 < sizeof head && head[i]; i++)
+        if (!memcmp(head + i, "<key>", 5)) {
+          size_t k = 0; i += 5;
+          while (i < sizeof head && head[i] != '<' && k + 1 < sizeof key) key[k++] = static_cast<char>(head[i++]);
+          key[k] = 0; break;
+        }
+      static char seen[16][64]; static unsigned seenCount; bool known = false;
+      for (unsigned i = 0; i < seenCount; i++) if (!strcmp(seen[i], key)) known = true;
+      if (!known) { if (seenCount < 16) strlcpy(seen[seenCount++], key, sizeof seen[0]); log(6, "wifi-net: property %s set (accepted)", key); }
+      return 0; }
+    case 470: case 471: case 473: return 0;
     default: return EOPNOTSUPP;
     }
   }
@@ -516,7 +575,10 @@ int apple80211(bool set, apple80211req &rq) {
   case kPower: w[0] = 1; w[1] = 1; w[2] = gPower && st.state != NW_STA_OFF ? 1 : 0; return copy_out(rq, w, 24);
   case kState: return answer_value(rq, static_cast<uint32_t>(gPower ? map_state(st.state) : 0));
   case kOpMode: return answer_value(rq, 1);   // station
-  case kAuthType: w[0] = 1; w[1] = 1; w[2] = gKeyed ? 0x10 : 0; w[3] = 0; return copy_out(rq, w, 16);   // {version, lower: open system, upper: WPA2 personal, extension}
+  // {version, lower, upper, extension}: what the daemon asked for in its join request (21H461: lower 1 open system, upper 8 WPA2-PSK).
+  // The constant 0x10 answered before (24A446's numbering) differed from 21H461's 8; combo21's wifid then polled this every 1-4 s and
+  // never showed the network as joined.
+  case kAuthType: w[0] = 1; w[1] = gAuthLower; w[2] = st.state >= NW_STA_ASSOC ? gAuthUpper : 0; w[3] = 0; return copy_out(rq, w, 16);
   case kPowerSave: return answer_value(rq, 0);
   case kCardCaps: {   // a bitmap, bit n in byte n / 8: AES, AES-CCM, power management, short slot and preamble, WPA2, WME, short guard interval at 20 MHz
     static const uint8_t has[] = { 2, 3, 6, 9, 10, 14, 17, 19 };
@@ -575,7 +637,23 @@ errno_t if_ioctl(ifnet_t, unsigned long cmd, void *data) {
           cmd == SIOCSA80211 ? 'S' : 'G', e, current.state,
           __atomic_load_n(&gJoinPending, __ATOMIC_ACQUIRE), gAssocResult, current.signal_dbm);
     }
-    if (shown < 300 || first || joinState) { ++shown; log(6, "wifi-net: request %u: type %d %s len %u val %d -> %d (len %u val %d)", shown, type, cmd == SIOCSA80211 ? "set" : "get", len, val, e, rq->req_len, rq->req_val); }
+    const bool postJoin = gPostJoinLog > 0 && (gPostJoinLog--, true);
+    if (shown < 300 || first || joinState || postJoin) { ++shown; log(6, "wifi-net: request %u: type %d %s len %u val %d -> %d (len %u val %d)", shown, type, cmd == SIOCSA80211 ? "set" : "get", len, val, e, rq->req_len, rq->req_val); }
+    // T970: a refused set request's first 48 bytes, once per type (combo8b: 383/419/470/473 refused, no scan request seen); never for
+    // the association or key requests, which are handled and can carry a key
+    if (e == EOPNOTSUPP && cmd == SIOCSA80211 && type >= 0 && type < 512 && type != kAssociate && type != kCipherKey && rq->req_len) {
+      static uint32_t dumped[16];
+      if (!(dumped[type / 32] & (1u << (type % 32)))) {
+        dumped[type / 32] |= 1u << (type % 32);
+        uint8_t b[48] = {}; const size_t n = rq->req_len < sizeof b ? rq->req_len : sizeof b;
+        if (!copy_in(*rq, b, n)) {
+          char hex[2 * sizeof b + 1]; static const char d[] = "0123456789abcdef";
+          for (size_t i = 0; i < n; i++) { hex[2 * i] = d[b[i] >> 4]; hex[2 * i + 1] = d[b[i] & 15]; } hex[2 * n] = 0;
+          log(6, "wifi-net: refused %d len %u: %.48s", type, rq->req_len, hex);
+          if (n > 24) log(6, "wifi-net: refused %d +24: %s", type, hex + 48);
+        }
+      }
+    }
     return e;
   }
   case SIOCGIFMEDIA: {
@@ -584,6 +662,11 @@ errno_t if_ioctl(ifnet_t, unsigned long cmd, void *data) {
     // the framework lists wireless interfaces by this media type
     m->ifm_current = IFM_IEEE80211 | IFM_AUTO; m->ifm_mask = 0; m->ifm_status = IFM_AVALID | (st.state == NW_STA_UP ? IFM_ACTIVE : 0);
     m->ifm_active = IFM_IEEE80211 | IFM_AUTO; m->ifm_count = 1;
+    return 0;
+  }
+  case SIOCGIFDEVMTU: {   // configd asks for the device MTU range (combo20/22: "interface request c0206944 not handled")
+    struct ifreq *r = static_cast<struct ifreq *>(data);
+    r->ifr_devmtu.ifdm_current = 1500; r->ifr_devmtu.ifdm_min = 1280; r->ifr_devmtu.ifdm_max = 1500;
     return 0;
   }
   case SIOCSIFFLAGS: case SIOCSIFMTU: case SIOCADDMULTI: case SIOCDELMULTI: case SIOCSIFADDR: case SIOCSIFMEDIA: return 0;
@@ -665,6 +748,11 @@ void publish_registry(const char *ifname) {
   if (OSNumber *n = OSNumber::withNumber(static_cast<unsigned long long>(IFT_ETHER), 32)) { wlan->setProperty("IOInterfaceType", n); n->release(); }
   if (OSNumber *n = OSNumber::withNumber(0ULL, 32)) { wlan->setProperty("IOInterfaceUnit", n); n->release(); }
   wlan->setProperty("IOBuiltin", true); wlan->setProperty("IOPrimaryInterface", true); wlan->setProperty("IO80211InterfaceRole", "Infrastructure");
+  // configd and wifid open the IO80211Interface; their sandbox profiles deny that for this service ("Protobox: configd/wifid deny(1)
+  // iokit-open-service IO80211Interface", combo20). The board's sandbox grant (patches/xnu/t970-sandbox-grant-entitlement.patch, IOUserClient
+  // native_sandbox_grant) takes the place of the sandbox's verdict for the processes named here.
+  wlan->setProperty("NativeSandboxGrantProcess", "configd,wifid,wifianalyticsd,WiFiCloudAssetsClient,locationd,sharingd,mDNSResponder");
+  controller->setProperty("NativeSandboxGrantProcess", "configd,wifid");
   if (!publish(wlan, controller, "T970WLAN")) log(3, "wifi-net: the interface service did not start"); else wlan->release();
   controller->release();
 }
@@ -684,6 +772,8 @@ void log_traffic() {
   log(6, "wifi-net: tx %s", tx);
   log(6, "wifi-net: in arp %u ip4 %u dhcp %u ip6 %u other %u", gKindsIn.arp, gKindsIn.ip4, gKindsIn.dhcp, gKindsIn.ip6, gKindsIn.other);
   log(6, "wifi-net: out arp %u ip4 %u dhcp %u ip6 %u other %u", gKindsOut.arp, gKindsOut.ip4, gKindsOut.dhcp, gKindsOut.ip6, gKindsOut.other);
+  log(6, "wifi-net: in dns %u tcp %u syn %u syn-ack %u rst %u", gKindsIn.dns, gKindsIn.tcp, gKindsIn.syn, gKindsIn.synack, gKindsIn.rst);
+  log(6, "wifi-net: out dns %u tcp %u syn %u syn-ack %u rst %u", gKindsOut.dns, gKindsOut.tcp, gKindsOut.syn, gKindsOut.synack, gKindsOut.rst);
   log(6, "wifi-net: input stalls %u, kicks %u, cleared after a kick %u, longest %u s", gStall.count, gStall.kicks, gStall.cleared, gStall.longest);
   log(6, "wifi-net: rx no buffer %u, chained %u, longest frame %u", gRxNoBuffer, gRxChains, gRxLongest);
   log(6, "wifi-net: rx batches %u largest %u", gRxBatches, gRxLargestBatch);
@@ -782,7 +872,7 @@ void autoJoin(void *, wait_result_t) {
     for (int i = 0, n = nw_wifi_bss_count(); i < n; ++i)
       if (!nw_wifi_bss_get(i, &b) && b.ssid_len == sl && !memcmp(b.ssid, ssid, sl)) { found = true; break; }
     log(6, "wifi-net: auto join round %u: %d networks seen, wanted one %s", round, nw_wifi_bss_count(), found ? "found" : "not found");
-    if (found) { gKeyed = hasPsk; const int r = nw_wifi_connect(reinterpret_cast<const uint8_t *>(ssid), sl, nullptr, hasPsk ? psk : nullptr, hasPsk ? pl : 0); log(6, "wifi-net: auto join requested: %d", r); }
+    if (found) { gKeyed = hasPsk; gAuthLower = 1; gAuthUpper = hasPsk ? 8 : 0; const int r = nw_wifi_connect(reinterpret_cast<const uint8_t *>(ssid), sl, nullptr, hasPsk ? psk : nullptr, hasPsk ? pl : 0); log(6, "wifi-net: auto join requested: %d", r); }
     else nw_wifi_scan(nullptr, 0);
   }
   memset(psk, 0, sizeof psk);

@@ -1,8 +1,32 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // Shared production command path. Included inside the root transport namespace.
-// The host harness replaces only MMIO, DMA synchronization, clock and lock primitives.
+// The host harness replaces only MMIO, DMA synchronization, clock, spin and lock primitives.
+// Poll pacing. The polled command must not depend on a timer interrupt to make progress.
+// On this board cpu_idle_latency is 0, so ml_delay_should_spin() is false and every IODelay,
+// even IODelay(2), is assert_wait_deadline + thread_block on a 2 us timer. Polled UFS used to
+// do that once per poll: launchd[1] "caught waking the CPU ... 4.5M wakes / second", ~60k
+// timer IRQs a second on the P cores, and every one of those wakeups was taken while holding
+// gHost.lock (and the whole-userdata ioLock). One lost timer wakeup parks the holder forever,
+// and with it every other UFS user (the board log writer, APFS) -- the combo11/14/15/17 hangs:
+// PID 1 in pollUfsTransfer -> delay_for_interval -> thread_block, the log writer gone at 8 s.
+// Now: busy-poll by the counter (no wait, preemption left on) for the first kUfsPollSpinUs of a
+// command, which covers every normal 4K read/write; only a slow command (cache flush, a device
+// stall) falls back to sleeping kUfsPollSleepUs per poll. The deadline is unchanged.
+static constexpr uint32_t kUfsPollSpinUs = 20000, kUfsPollPaceUs = 2, kUfsPollSleepUs = 200;
+
+// Passive transport counters for the board log (native_ufs_poll_text). Written under gHost.lock,
+// read racily by diagnostics only; timestamps are mach_absolute_time units, 0 = not in progress.
+struct UfsPollStats {
+  uint64_t commands = 0, slowCommands = 0, sleeps = 0, maxTicks = 0;
+  uint64_t lockWaitMax = 0, logLockWaitMax = 0, lockHoldMax = 0;
+  uint64_t inflightSince = 0, lockHeldSince = 0;
+  uint32_t inflightOpcode = 0, timeouts = 0, fatals = 0, logWrites = 0;
+};
+static UfsPollStats gUfsPoll;
+
 struct HardwareTransferPort {
   uint64_t deadline;
+  uint64_t spinUntil;
   uint32_t doorbell () { return read32 (gHost.hc, 0x58); }
   uint32_t interrupt () { return read32 (gHost.hc, 0x20); }
   uint32_t completedOcs () {
@@ -10,8 +34,36 @@ struct HardwareTransferPort {
     return *reinterpret_cast<volatile uint32_t *> (gHost.virt + 8) & 0xff;
   }
   bool expired () { return mach_absolute_time () >= deadline; }
-  void delay () { IODelay (2); }
+  void delay () {
+    if (mach_absolute_time () < spinUntil) {
+      ufsSpinPause (kUfsPollPaceUs);
+      return;
+    }
+    ++gUfsPoll.sleeps;
+    IODelay (kUfsPollSleepUs);
+  }
 };
+
+// gHost.lock with wait/hold accounting. `logWindow`: the board log writer's own writes, kept apart
+// so a starved writer shows as logLockWaitMax.
+static void hostLock (bool logWindow = false)
+{
+  const uint64_t asked = mach_absolute_time ();
+  IOLockLock (gHost.lock);
+  const uint64_t now = mach_absolute_time ();
+  const uint64_t waited = now - asked;
+  if (waited > gUfsPoll.lockWaitMax) gUfsPoll.lockWaitMax = waited;
+  if (logWindow && waited > gUfsPoll.logLockWaitMax) gUfsPoll.logLockWaitMax = waited;
+  gUfsPoll.lockHeldSince = now;
+}
+
+static void hostUnlock (void)
+{
+  const uint64_t held = mach_absolute_time () - gUfsPoll.lockHeldSince;
+  if (held > gUfsPoll.lockHoldMax) gUfsPoll.lockHoldMax = held;
+  gUfsPoll.lockHeldSince = 0;
+  IOLockUnlock (gHost.lock);
+}
 
 static void putBe32 (uint8_t *at, uint32_t value)
 {
@@ -79,9 +131,20 @@ static IOReturn hostSubmit (uint32_t direction, uint32_t dataBytes, uint32_t tim
   hostWrite (0x20, 1);  // Acknowledge completion only; preserve error evidence.
   HardwareTransferPort port;
   clock_interval_to_deadline (timeoutUs, kMicrosecondScale, &port.deadline);
+  clock_interval_to_deadline (kUfsPollSpinUs < timeoutUs ? kUfsPollSpinUs : timeoutUs, kMicrosecondScale, &port.spinUntil);
+  const uint64_t rang = mach_absolute_time ();
+  gUfsPoll.inflightOpcode = gRootDiagnostic.opcode;
+  gUfsPoll.inflightSince = rang ? rang : 1;
   hostWrite (0x58, 1);
   UfsTransferPoll state;
   UfsTransferEnd end = pollUfsTransfer (port, state);
+  const uint64_t took = mach_absolute_time () - rang;
+  gUfsPoll.inflightSince = 0;
+  ++gUfsPoll.commands;
+  if (took > gUfsPoll.maxTicks) gUfsPoll.maxTicks = took;
+  if (mach_absolute_time () >= port.spinUntil) ++gUfsPoll.slowCommands;
+  if (end == UfsTransferEnd::Timeout) ++gUfsPoll.timeouts;
+  if (end == UfsTransferEnd::Fatal) ++gUfsPoll.fatals;
   gRootDiagnostic.polls = state.polls;
   gRootDiagnostic.dbSeen = state.doorbellSeen;
   gRootDiagnostic.isSeen = state.interruptSeen;
@@ -224,7 +287,7 @@ static IOReturn hostReadCapacity (uint8_t lun, UfsReadCapacity *capacity)
   capacity->blockBytes = 0;
   capacity->scsi = 0xffff;
   capacity->ocs = 0xff;
-  IOLockLock (gHost.lock);
+  hostLock ();
   uint8_t cdb[10] = { 0x25 };
   uint32_t scsi = 0;
   IOReturn status = hostScsi (lun, cdb, 10, true, 8, 1000000, &scsi);
@@ -234,7 +297,7 @@ static IOReturn hostReadCapacity (uint8_t lun, UfsReadCapacity *capacity)
     capacity->lastLba = loadBe32 (gHost.virt + kDataOffset);
     capacity->blockBytes = loadBe32 (gHost.virt + kDataOffset + 4);
   }
-  IOLockUnlock (gHost.lock);
+  hostUnlock ();
   return status;
 }
 
@@ -273,7 +336,7 @@ static IOReturn hostRead4k (uint8_t lun, uint64_t lba, uint32_t blocks, void *ds
   if (!gHost.ready || !dst || !blocks || blocks > kDataMax / 4096 || lba > 0xffffffffULL - (blocks - 1)) {
     return kIOReturnBadArgument;
   }
-  IOLockLock (gHost.lock);
+  hostLock ();
   gRootDiagnostic.lba = lba;
   uint8_t cdb[10] = { 0x28, 0, uint8_t (lba >> 24), uint8_t (lba >> 16), uint8_t (lba >> 8), uint8_t (lba),
                       0, uint8_t (blocks >> 8), uint8_t (blocks), 0 };
@@ -282,7 +345,7 @@ static IOReturn hostRead4k (uint8_t lun, uint64_t lba, uint32_t blocks, void *ds
   if (status == kIOReturnSuccess) {
     memcpy (dst, gHost.virt + kDataOffset, blocks * 4096U);
   }
-  IOLockUnlock (gHost.lock);
+  hostUnlock ();
   return status;
 }
 
@@ -332,14 +395,16 @@ static IOReturn hostWrite4k (uint8_t lun, uint64_t lba, uint32_t blocks, const v
   if (!gHost.ready || !src || !blocks || blocks > kDataMax / 4096 || lun != 0 || !hostInWindow (lba, blocks)) {
     return kIOReturnBadArgument;
   }
-  IOLockLock (gHost.lock);
+  const bool logWrite = gLogOpen && lba >= gLogFirst && lba - gLogFirst < gLogBlocks;
+  hostLock (logWrite);
+  if (logWrite) ++gUfsPoll.logWrites;
   gRootDiagnostic.lba = lba;
   memcpy (gHost.virt + kDataOffset, src, blocks * 4096U);
   uint8_t cdb[10] = { 0x2a, uint8_t (fua ? 0x08 : 0), uint8_t (lba >> 24), uint8_t (lba >> 16), uint8_t (lba >> 8), uint8_t (lba),
                       0, uint8_t (blocks >> 8), uint8_t (blocks), 0 };
   uint32_t scsi = 0;
   IOReturn status = hostScsiDir (0, cdb, 10, 1, blocks * 4096U, 2000000, &scsi);
-  IOLockUnlock (gHost.lock);
+  hostUnlock ();
   return status;
 }
 
@@ -347,11 +412,11 @@ static IOReturn hostWrite4k (uint8_t lun, uint64_t lba, uint32_t blocks, const v
 static IOReturn hostSyncCache (void)
 {
   if (!gHost.ready || (!gStoreOpen && !gLogOpen && !gRootOpen)) return kIOReturnNotReady;
-  IOLockLock (gHost.lock);
+  hostLock ();
   uint8_t cdb[10] = { 0x35 };
   uint32_t scsi = 0;
   IOReturn status = hostScsiDir (0, cdb, 10, 0, 0, 10000000, &scsi);
-  IOLockUnlock (gHost.lock);
+  hostUnlock ();
   return status;
 }
 

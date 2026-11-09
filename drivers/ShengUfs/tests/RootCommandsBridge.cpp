@@ -36,6 +36,8 @@ static void clock_interval_to_deadline(uint32_t interval, unsigned scale, uint64
 }
 static uint64_t mach_absolute_time() { return callback(4,0,0,nullptr); }
 static void IODelay(uint32_t us) { callback(5,0,us,nullptr); }
+// The production busy-wait advances only the simulated clock here.
+static void ufsSpinPause(uint32_t us) { callback(5,0,us,nullptr); }
 static void IOLockLock(void *) {}
 static void IOLockUnlock(void *) {}
 static IOReturn recordTransport(IOReturn result,uint32_t ocs) {

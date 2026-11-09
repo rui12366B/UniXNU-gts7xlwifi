@@ -1450,6 +1450,135 @@ void hangRows(unsigned t) {
     changed();
 }
 
+// gts7xlwifi gpufault1 (2026-11-08). Settings > Wi-Fi / Sounds and swipe-up froze the whole tablet: one client's GPU read of an address
+// no table maps (FAR 0x1_1fbd7360, 0x1_106ee2a0, 0x1_086de2c0, IB2 0x1f311000; FSYNR0 PLVL 1/2, read) latched context bank 0's FSR, the
+// CP stopped inside that job, and this board had no restart hook, so the driver's hangcheck only counted the hang and never ended the
+// fault: every later proof of the bank failed and poisoned the VMs one by one (drivers/Adreno650/T970-GPU-FAULT-FREEZE.md). Now:
+//  - gpuBankFaultEnd, the driver's native_adreno_bank_fault_end: records the fault (the first and the latest, with FSYNR1 and
+//    UCHE_CLIENT_PF, which name the GPU block, and the ASID in TTBR0, which names the process), terminates a stalled transaction and
+//    clears the FSR, so the next table operation proves a clean bank;
+//  - gpuRestart, the driver's NativeAdrenoRestart: the reset a6xx_recover does for a GPU whose GMU it does not power-cycle (GBIF
+//    drained, RBBM_SW_RESET_CMD held 100 us), then hw_init, the ring, the SQE, a6xx_cp_init waited with a6xx_idle and the secure-mode
+//    exit, as UniXNU-sheng's gpuRestart; the driver then drops the hung job and replays the rest, the other processes go on;
+//  - dramRead32, the driver's native_adreno_dram_read32 (UniXNU-alioth's): the stall dump reads a client's IB through it ([gpu stall]
+//    br ib1 printed deadbeef without it, as user BOs have no kernel mapping).
+// [0] faults ended, [1] FSR, [2..3] FAR, [4] FSYNR0, [5] FSYNR1, [6] UCHE_CLIENT_PF, [7] ASID, [8] uptime s; [9..12] the first one's
+// FAR lo/hi, ASID, uptime s.
+extern "C" {uint32_t native_t970_gpu_fault[13];}
+// [0] restarts asked, [1] the step a failed one stopped at (0 none), [2] its status, [3] RBBM_STATUS after the reset, [4] restarts
+// that completed, [5] the GBIF drain's status (a hung bus may not acknowledge; the reset goes on, as a6xx_bus_clear_pending_transactions).
+extern "C" {uint32_t native_t970_gpu_restart[6];}
+extern "C" {
+extern int (*native_adreno_bank_fault_end)(unsigned bank);
+extern int (*native_adreno_dram_read32)(uint64_t physical, uint32_t *value);
+extern volatile uint32_t native_adreno_bank_fault_retries[2];
+struct NativeAdrenoAsidName {uint32_t asid; char name[16];};
+extern volatile struct NativeAdrenoAsidName native_adreno_asid_names[16];
+extern volatile uint32_t native_adreno_asid_name_count;
+void native_adreno_set_restart(NativeAdrenoRestart restart, void *cookie);
+}
+uint32_t uptimeSeconds() {
+    uint64_t ns = 0;
+    absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
+    return uint32_t(ns / 1000000000ull);
+}
+int gpuBankFaultEnd(unsigned bank) {
+    if (bank != kGpuBank || !gSmmuMap) return 0;
+    const uint32_t cb = smmuBank0();
+    const uint32_t fsr = smmuRead(cb + 0x58);
+    // FSR_FAULT (ArmSmmu4KProgram.c): MULTI, SS and the fault bits; 0x600 is the context's AArch64 format, not a fault.
+    if (!(fsr & 0xc00001feu)) return 0;
+    uint32_t *f = native_t970_gpu_fault;
+    const uint32_t asid = smmuRead(cb + 0x24) >> 16, t = uptimeSeconds();
+    f[1] = fsr; f[2] = smmuRead(cb + 0x60); f[3] = smmuRead(cb + 0x64); f[4] = smmuRead(cb + 0x68); f[5] = smmuRead(cb + 0x6c);
+    f[6] = gpuRead(0xE19); f[7] = asid; f[8] = t;
+    if (!f[0]) {f[9] = f[2]; f[10] = f[3]; f[11] = asid; f[12] = t;}
+    f[0] = f[0] + 1;
+    if (fsr & (1u << 30)) smmuWrite(cb + 0x08, 1);   // CB_RESUME TnR: the stalled transaction ends with an error
+    smmuWrite(cb + 0x58, fsr);
+    return 1;
+}
+IOReturn gpuRestart(void *, NativeAdrenoRing *ring, uint32_t completed) {
+    uint32_t *r = native_t970_gpu_restart;
+    r[0] = r[0] + 1;
+    auto fail = [&](uint32_t step, IOReturn status) {r[1] = step; r[2] = uint32_t(status); return status ? status : kIOReturnIOError;};
+    if (!ring || !gCpInit) return fail(1, kIOReturnNotReady);
+    (void)gpuBankFaultEnd(kGpuBank);
+    r[5] = uint32_t(ring->busHalt(true, 1000000));
+    gw(0x0043, 1); (void)gpuRead(0x0043);                               // RBBM_SW_RESET_CMD
+    IODelay(100);
+    gw(0x0043, 0); (void)gpuRead(0x0043);
+    IODelay(1);
+    r[3] = gpuRead(0x210);
+    hwInit();                                                           // releases both GBIF halts first
+    // gpufault3: hwInit wrote RBBM_INT_0_MASK again. A CP_HW_ERROR storm before the hang (combo10: status 0x200, 123218 interrupts)
+    // had masked the line and left gpuIrq's mask flag set; the reset cleared its cause, so the count starts over.
+    gIrqRepeat = 0; gIrqMasked = 0; gIrqLast = 0;
+    gw64(0x830, gNb[0].iova);                                           // CP_SQE_INSTR_BASE
+    IOReturn status = ring->restart(completed);
+    if (status) return fail(2, status);
+    gw(0x808, 1);                                                       // CP_SQE_CNTL
+    NativeAdrenoCpInitConfig config{gNb[0].iova, 0, 1};
+    config.generation = 6;
+    NativeAdrenoCpInit init;
+    uint32_t fence = 0;
+    status = init.run(&gRio, ring, &config, &fence, false);
+    if (status) return fail(3, status);
+    status = ring->idle(&gClock, 1000000);
+    if (status) return fail(4, status);
+    if (native_gpu_zap[0] == 7) {                                       // the zap shader was loaded: leave secure mode again
+        uint32_t words[2] = {};
+        if (AdrenoPM4Type7(0x66, 1, &words[0]) != AdrenoPM4Success) return fail(5, kIOReturnInternalError);
+        status = ring->submitUnfenced(words, 2);
+        if (!status) status = ring->idle(&gClock, 1000000);
+        if (status) return fail(5, status);
+    }
+    (void)gpuBankFaultEnd(kGpuBank);
+    r[1] = 0; r[2] = 0; r[4] = r[4] + 1;
+    return kIOReturnSuccess;
+}
+// UniXNU-alioth's reader: one page mapped uncached for the read, then unmapped (a page a pmap still maps cannot be freed).
+int dramRead32(uint64_t physical, uint32_t *value) {
+    if (!value) return -1;
+    const uint64_t page = physical & ~uint64_t(0xfff);
+    IODeviceMemory *memory = IODeviceMemory::withRange(page, 0x1000);
+    if (!memory) return -1;
+    IOMemoryMap *map = memory->map(kIOMapAnywhere | kIOMapInhibitCache);
+    memory->release();
+    if (!map) return -1;
+    *value = reinterpret_cast<volatile uint32_t *>(map->getVirtualAddress())[(physical - page) / 4];
+    map->release();
+    return 0;
+}
+const char *asidName(uint32_t asid) {
+    const uint32_t n = native_adreno_asid_name_count;
+    for (uint32_t k = 0; k < 16 && k < n; ++k) {
+        const volatile NativeAdrenoAsidName &e = native_adreno_asid_names[(n - 1 - k) & 15];
+        if (e.asid == asid) return const_cast<const char *>(e.name);
+    }
+    return "?";
+}
+// Row 28 once a fault was ended: count, the latest (FSR, FAR, FSYNR0/1, UCHE_CLIENT_PF, ASID and its process, uptime), the first's
+// FAR, ASID and uptime, then restarts done/asked, a failed one's step:status, and the bank proofs that ended a fault and passed again.
+// gpufault2: and the submissions the kernel refused with anything but Busy (each one loses that client's Vulkan device: Turnip's
+// "submit failed", which made the render server end itself in combo8b) and the table switches that answered Busy after 2 s.
+extern "C" {extern volatile uint32_t native_t970_submit_fail[5]; extern volatile uint32_t native_t970_usevm_busy[2];
+    extern volatile uint32_t native_t970_stale_submit[5];
+    extern volatile uint32_t native_adreno_recover_trace[4];}
+bool faultRow(char *line, size_t cap) {
+    const uint32_t *f = native_t970_gpu_fault, *r = native_t970_gpu_restart;
+    const volatile uint32_t *sf = native_t970_submit_fail;
+    const volatile uint32_t *ds = native_t970_stale_submit;
+    if (!f[0] && !r[0] && !sf[0] && !native_t970_usevm_busy[0] && !ds[0]) return false;
+    char name[12];
+    strlcpy(name, f[0] ? asidName(f[7]) : "-", sizeof name);
+    // Most useful first: the row is cut at 119 characters.
+    snprintf(line, cap, "FAULTS n%u %x@%x%08x s%x/%x pf%x a%u %s t%u|sf %u %x:%u p%u h%x|ds %u p%u h%x|rs %u/%u %u:%x|vb %u|pz %u:%x|1st %x%08x a%u",
+             f[0], f[1], f[3], f[2], f[4], f[5], f[6], f[7], name, f[8], sf[0], sf[1], sf[3], sf[2], sf[4], ds[0], ds[3], ds[1], r[4], r[0],
+             r[1], r[2], native_t970_usevm_busy[0], native_adreno_recover_trace[0], native_adreno_recover_trace[1], f[10], f[9], f[11]);
+    return true;
+}
+
 // The live row, every 2 s once the device is published: interrupts (count, last status, all seen, masked), submissions (submitted,
 // completed, timeouts, poisoned), user clients opened/closed, the BO pool (MiB in use, peak, size; BOs that did not fit and fell
 // back to scattered pages, scattered BOs in all), and the GPU's busy share of the last beat in per mille. Only changed values reach
@@ -1496,9 +1625,12 @@ void hangRows(unsigned t) {
         // bank 0's FSR (0x58), FSYNR0 (0x68) and FAR. A stream of the GPU outside its four routes would read and write without a
         // fault of its context bank.
         const uint32_t bank0 = smmuBank0();
-        snprintf(line, sizeof line, "FAULTS cr0 %x gfsr %x syn %x/%x/%x | cb0 fsr %x syn %x far %x%08x", smmuRead(0x0), smmuRead(0x48),
-                 smmuRead(0x50), smmuRead(0x54), smmuRead(0x58), smmuRead(bank0 + 0x58), smmuRead(bank0 + 0x68),
-                 smmuRead(bank0 + 0x64), smmuRead(bank0 + 0x60));
+        // gpufault1: a fault latched since the last table operation is ended (and recorded) here too; once one was, the row shows them.
+        (void)gpuBankFaultEnd(kGpuBank);
+        if (!faultRow(line, sizeof line))
+            snprintf(line, sizeof line, "FAULTS cr0 %x gfsr %x syn %x/%x/%x | cb0 fsr %x syn %x far %x%08x", smmuRead(0x0), smmuRead(0x48),
+                     smmuRead(0x50), smmuRead(0x54), smmuRead(0x58), smmuRead(bank0 + 0x58), smmuRead(bank0 + 0x68),
+                     smmuRead(bank0 + 0x64), smmuRead(bank0 + 0x60));
         if (strncmp(line, native_gpu_rows[kRowFaults], sizeof line)) {
             strlcpy(native_gpu_rows[kRowFaults], line, sizeof native_gpu_rows[0]);
             changed();
@@ -1589,6 +1721,14 @@ extern "C" void native_gpu_probe(void) {
     unsigned mode = 0;
     if (gMode || !PE_parse_boot_argn("pipa-gpu", &mode, sizeof mode) || !mode) return;
     gMode = mode > 12 ? 12 : mode;
+    // gpufault1: before the GPU thread submits anything. t970-gpu-recover=0 leaves all three out (the old behaviour).
+    unsigned recover = 1;
+    PE_parse_boot_argn("t970-gpu-recover", &recover, sizeof recover);
+    if (recover) {
+        native_adreno_dram_read32 = dramRead32;
+        native_adreno_bank_fault_end = gpuBankFaultEnd;
+        native_adreno_set_restart(gpuRestart, nullptr);
+    }
     thread_t thread = nullptr;
     if (kernel_thread_start(gpuThread, nullptr, &thread) == KERN_SUCCESS) thread_deallocate(thread);
 }

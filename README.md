@@ -3,7 +3,7 @@
 iPadOS 17.7.11 (21H461) on the **Samsung Galaxy Tab S7+ Wi-Fi (SM-T970, gts7xlwifi, Qualcomm SM8250 / Adreno 650)**, as a
 [UniXNU](https://unixnu.com/) device repository. 中文说明见下方。
 
-## Status (2026-11-08, test build "combo7")
+## Status (2026-11-09, test build "combo22")
 
 | Area | State |
 | --- | --- |
@@ -19,11 +19,12 @@ iPadOS 17.7.11 (21H461) on the **Samsung Galaxy Tab S7+ Wi-Fi (SM-T970, gts7xlwi
 | Audio | Speakers work as the iOS output: ADSP loader (GLINK/SMEM/SMP2P/QMP), APR → AFE/ADM/ASM, PRI TDM, four CS35L41 amps, HAL plug-in (`package/T970Audio.cpp`, `hal/`, `t970-adsp=2 t970-audio=32`). Clean sound since SCLK_INV and the ring fix; quieter than Android (no Cirrus protection firmware yet) |
 | Haptics | Vibration motor on PM8150L LDO7 (`package/T970Haptics.cpp`, `t970-haptics`) |
 | Shutdown | Works: failsafe PSCI call after unmount (`t970-shutdown-failsafe.patch`), amps muted first |
-| Wi-Fi | QCA6390 with Linux ath11k (stage 6, `t970-wifi=6`): firmware reaches mission mode, QRTR/QMI up, board-file download stops on an MHI BAD_TRE; not usable yet |
-| Bluetooth | QCA6390 BT over QUP0 SE6 UART: power, clocks, SMMU and DMA up (`t970-bt`); HCI readback and firmware download in progress |
-| Sensors | All behind the SLPI (FastRPC needed); fake accelerometer/gyro/orientation HID devices for rotation testing (`t970-sensors`); rotation not working yet |
-| Camera | Front/rear/ultra-wide sensors answer over CCI and stream; CSIPHY/CSID receive works (`t970-camera`); nothing in iPadOS consumes frames yet |
-| Known issues | GPU page fault can freeze the system (Settings > Wi-Fi), fix in testing; Apple USB device stack (Finder/usbmux) not started |
+| Wi-Fi | QCA6390 with Linux ath11k and a wpa_supplicant service (`t970-wifi=6 t970-wifi-svc=1`): scans, joins WPA2, gets DHCP, DNS and TCP work; iOS does not yet mark the link usable (no status-bar icon, Safari offline) |
+| Bluetooth | Controller up with firmware (BT 5.2), served to iOS over the UART pipe with a replacement BlueTool (`t970-bt=257`); Settings shows Bluetooth, but bluetoothd exits (keychain) so it is unavailable |
+| Sensors | All behind the SLPI; fake accelerometer/gyro/orientation HID devices; rotation not working yet |
+| Camera | Front sensor streams RAW10 with auto exposure into a T970Camera service (`t970-camera=961`); no iOS camera app path yet |
+| Charging | Rp/BC1.2-based input and charge limits; 9 V PD/AFC opt-in (`t970-hv`) |
+| Known issues | GPU faults now recover instead of freezing; the first boot after a new addon writes files and takes longer; Apple USB device stack (Finder/usbmux) not started |
 
 ## Not in this repository
 
@@ -49,9 +50,9 @@ with the MUIC switch closed, the live CDC log is `/dev/cu.usbmodem*` on the Mac.
 ## 中文简介
 
 在三星 Galaxy Tab S7+（SM-T970，骁龙 865）上运行 iPadOS 17.7.11。已经可以进入桌面并流畅使用：八核与 4+3+1 调度簇、按负载调频、
-原生 UFS 存储与可持久化的 Data、GPU 加速合成（Adreno 650）、触摸与按键、亮度、USB 调试串口、电量显示，扬声器出声（音质正常，
-音量比安卓小）、振动、关机断电。Wi-Fi（固件已启动，卡在板级数据下载）、蓝牙、传感器（屏幕旋转）、相机还在做；打开“设置”偶尔
-会因 GPU 缺页卡死，修复测试中。仓库不包含任何苹果、高通、三星的二进制文件，需要从自己的设备提取，见 `proprietary-files.txt`。
+原生 UFS 存储与可持久化的 Data、GPU 加速合成（Adreno 650，出错后可自动恢复）、触摸与按键、亮度、扬声器、振动、关机断电、充电。
+Wi-Fi 已能扫描、连接并获取地址，但系统还未把链路标记为可用（无图标、Safari 无法上网）；蓝牙芯片已工作，系统服务还在适配；
+传感器（屏幕旋转）和相机还在做。仓库不包含任何苹果、高通、三星的二进制文件，需要从自己的设备提取，见 `proprietary-files.txt`。
 
 ## Credits
 

@@ -33,6 +33,18 @@
         status = "okay";
     };
 
+    // The QCA6390's Bluetooth side as bluetoothd and MobileGestalt look for it (/arm-io/bluetooth, as UniXNU-sheng exports its
+    // WCN7850). The ADT export keeps only compatible/device_type here; serve mode (t970-bt bits 1 + 256, package/T970Bluetooth.cpp)
+    // adds transport-encoding 1 (H4 over UART), transport-speed, local-mac-address and /chosen/mac-address-bluetooth0 before
+    // userland starts. Without them MobileGestalt's Bluetooth capability (a non-zero 6-byte address) stays false and Settings
+    // shows no Bluetooth row, as before.
+    bluetooth {
+        device_type = "bluetooth";
+        compatible = "qcom,qca6390-bt";
+        unixnu,adt-name = "bluetooth";
+        status = "okay";
+    };
+
     reserved-memory {
         #address-cells = <2>;
         #size-cells = <2>;

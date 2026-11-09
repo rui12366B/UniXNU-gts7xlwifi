@@ -452,29 +452,41 @@ IOReturn NativeAdrenoUserClient::setPriority(uint32_t foreground,uint32_t backgr
     }
     return kIOReturnSuccess;
 }
+/* gts7xlwifi gpufault2: [0] submissions refused with anything but Busy, [1] the latest status, [2] its pid, [3] where: 1 request,
+ * 2 queue, 3 wait fence, 4 IB size, 5 IB handle unknown or unmapped in this client, 6 the submission object (VM describe, hold, ring);
+ * gpufault4: [4] the IB's handle (low word) when stage 5 named one. */
+extern "C" {volatile uint32_t native_t970_submit_fail[5];}
+static IOReturn submitRefused(IOReturn status,uint32_t where,uint64_t handle=0)
+{
+    if(status && status!=kIOReturnBusy) {
+        native_t970_submit_fail[0]=native_t970_submit_fail[0]+1;native_t970_submit_fail[1]=uint32_t(status);
+        native_t970_submit_fail[2]=uint32_t(proc_selfpid());native_t970_submit_fail[3]=where;native_t970_submit_fail[4]=uint32_t(handle);
+    }
+    return status;
+}
 IOReturn NativeAdrenoUserClient::submit(const NativeAdrenoAbiSubmit *request,
     NativeAdrenoAbiSubmitReply *reply,const NativeAdrenoRingClock *clock)
 {
-    if(!request || !reply)return kIOReturnBadArgument;reply->fence=0;
-    if(!open_)return kIOReturnNotReady;
+    if(!request || !reply)return submitRefused(kIOReturnBadArgument,1);reply->fence=0;
+    if(!open_)return submitRefused(kIOReturnNotReady,1);
     if(!request->buffer_count || request->buffer_count>NativeAdrenoAbiMaxBuffers ||
-        request->reserved)return kIOReturnBadArgument;
+        request->reserved)return submitRefused(kIOReturnBadArgument,1);
     if(request->queue>=queue_capacity_ || !queues_[request->queue].active)
-        return kIOReturnBadArgument;
+        return submitRefused(kIOReturnBadArgument,2);
     if(request->wait_fence) {
-        if(!clock)return kIOReturnBadArgument;
+        if(!clock)return submitRefused(kIOReturnBadArgument,3);
         const uint32_t wait_us=request->wait_timeout_ns==0?0:
             (request->wait_timeout_ns>UINT64_C(0xffffffff)*1000u?0xffffffffu:
             (uint32_t)(request->wait_timeout_ns/1000));
         const IOReturn waited=submit_->observeFence((uint32_t)request->wait_fence,clock,wait_us);
-        if(waited)return waited;
+        if(waited)return submitRefused(waited,3);
     }
     NativeAdrenoSubmitBuffer *buffers=submit_buffers_;
     for(uint32_t i=0;i<request->buffer_count;++i) {
         const NativeAdrenoAbiSubmitBuffer &wire=request->buffers[i];
-        if(!wire.bytes || (wire.bytes&3))return kIOReturnBadArgument;
+        if(!wire.bytes || (wire.bytes&3))return submitRefused(kIOReturnBadArgument,4);
         Entry *entry=find(wire.handle);
-        if(!entry || !entry->mapped_state)return kIOReturnBadArgument;
+        if(!entry || !entry->mapped_state)return submitRefused(kIOReturnBadArgument,5,wire.handle);
         buffers[i]={entry->mapped,wire.iova,(size_t)wire.bytes};
     }
     uint32_t fence=0;
@@ -485,7 +497,8 @@ IOReturn NativeAdrenoUserClient::submit(const NativeAdrenoAbiSubmit *request,
     submit_->nextRole(t970_task_gpu_role(current_task()));
     const IOReturn status=submit_->submit(vm_,buffers,request->buffer_count,
         queue_base_+request->queue,&fence,clock);
-    if(status)return status;
+    /* gts7xlwifi gpufault2: a refused submission other than Busy loses the client's device (Turnip "submit failed"). */
+    if(status)return submitRefused(status,6);
     reply->fence=fence;
     return kIOReturnSuccess;
 }

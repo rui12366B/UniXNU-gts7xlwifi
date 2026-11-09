@@ -36,6 +36,7 @@ static void IODelay(uint32_t us) {
   uint64_t end; clock_interval_to_deadline(us,1,&end);
   while (mach_absolute_time()<end) asm volatile("yield");
 }
+static void ufsSpinPause(uint32_t us) { IODelay(us); }
 // Single EL1 CPU, interrupts masked. This does not test XNU lock scheduling.
 static void IOLockLock(void *) {}
 static void IOLockUnlock(void *) {}

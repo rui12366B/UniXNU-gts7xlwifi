@@ -132,6 +132,10 @@ struct NativeAdrenoClientRecord native_adreno_client_log[8];
 /* The last text line (the plugin's failure reason) each process other than the render server streamed: process name and a 64-byte line. */
 struct NativeAdrenoClientText {char name[20]; char text[64];};
 struct NativeAdrenoClientText native_adreno_client_text[8];
+/* gts7xlwifi gpufault1: the newest 16 connections' ASIDs and process names (first 15 characters). */
+struct NativeAdrenoAsidName {uint32_t asid; char name[16];};
+volatile struct NativeAdrenoAsidName native_adreno_asid_names[16];
+volatile uint32_t native_adreno_asid_name_count;
 /* Why the latest mount of a connection failed: [0] 1 no address space, 2 the core's open, 3 the window scope; [1] its IOReturn; [2] the queue base; [3] failures so far. */
 volatile uint32_t native_adreno_mount_fail[4];
 /* Processes that read MetalPluginName (the Metal discovery), first twelve names, with counts. */
@@ -372,6 +376,12 @@ bool AGXDeviceUserClient::mount(bool kernel)
             core_=core;core=nullptr;space_=space;space=nullptr;row_=row;kernel_=kernel;live_=true;ok=true;
             if(kernel)g.kernel_client=true;
             ++g.opened;
+            /* gts7xlwifi gpufault1: which process an ASID is, for the board's GPU fault row (the faulting table's ASID is TTBR0's top). */
+            if(vm) {
+                const uint32_t n=native_adreno_asid_name_count;volatile NativeAdrenoAsidName *e=&native_adreno_asid_names[n&15];
+                e->asid=vm->asid();for(unsigned i=0;i<sizeof e->name;++i)e->name[i]=i+1<sizeof e->name?name_[i]:0;
+                native_adreno_asid_name_count=n+1;
+            }
             if(NativeAdrenoClientRecord *record=clientRecord(name_))record->slot=row;
         } else {
             native_adreno_mount_fail[0]=3;native_adreno_mount_fail[1]=uint32_t(scoped);native_adreno_mount_fail[2]=uint32_t(base>>32);native_adreno_mount_fail[3]=native_adreno_mount_fail[3]+1;
@@ -746,6 +756,7 @@ IOReturn AGXDeviceUserClient::run(uint32_t method,const void *input,size_t input
     }
     return status;
 }
+extern "C" {volatile uint32_t native_t970_stale_submit[5];}
 /* The processes' notes (NativeAdrenoMethodNote): rows of [words used, pid, the record's words], 512 of each kind, allocated at the first
  * note (the kernel's data segment has no room for them as arrays). The board's export reads the two pointers. */
 enum { NativeAdrenoNoteRows = 512, NativeAdrenoNoteRowWords = 2+NativeAdrenoNoteWords };
@@ -809,6 +820,14 @@ IOReturn AGXDeviceUserClient::runTimed(uint32_t method,const void *input,size_t 
         if(!input || input_size!=sizeof(NativeAdrenoAbiNote) || output_size)return kIOReturnBadArgument;
         NativeAdrenoAbiNote note{};
         memcpy(&note,input,sizeof(note));
+        /* gts7xlwifi gpufault4: Turnip (t970-bo-safe) did not send a submission naming a freed BO: counted for the board's row 28,
+         * [0] drops, [1..2] the first freed handle of the latest, [3] its pid, [4] its stale entries. */
+        if(note.kind==0x5354) {
+            native_t970_stale_submit[0]=native_t970_stale_submit[0]+1;native_t970_stale_submit[1]=note.words[1];
+            native_t970_stale_submit[2]=note.words[2];native_t970_stale_submit[3]=uint32_t(proc_selfpid());
+            native_t970_stale_submit[4]=note.words[0];
+            return kIOReturnSuccess;
+        }
         if((note.kind!=NativeAdrenoNotePass && note.kind!=NativeAdrenoNotePipeline) || note.count>NativeAdrenoNoteWords)return kIOReturnBadArgument;
         const bool pass=note.kind==NativeAdrenoNotePass;
         volatile uint32_t *count=pass?&native_adreno_pass_count:&native_adreno_pipe_count;

@@ -159,6 +159,12 @@ patch('mac.c', [('#include "mac.h"\n', '#include "mac.h"\nvoid nw_board_mac(u8 *
                  '\t\t    (!ar->mac_addr[0] && ar->mac_addr[1] == 0x03 && ar->mac_addr[2] == 0x7f)) {\n'
                  '\t\t\tnw_board_mac(ar->mac_addr);\n\t\t\tar->mac_addr[4] += i;\n\t\t}\n', 1)])
 
+# combo8 (int24): after "wlan mode req mode 0" no HTC READY came on CE pipe 2 and QMI went quiet; at that timeout the board logs
+# the MHI state/EE and every copy engine's ring pointers (package/T970Ath11k.c t970_htc_dump).
+patch('htc.c', [('\t\tath11k_warn(ab, "ctl_resp never came in (%d)\\n", status);\n',
+                 '\t\tath11k_warn(ab, "ctl_resp never came in (%d)\\n", status);\n'
+                 '\t\t{ extern void t970_htc_dump(struct ath11k_base *); t970_htc_dump(ab); }\n', 1)])
+
 # MHI's boot.c (the module's generated copy, with its pre-load hook) once more: the BHI boot loader buffer is announced to the
 # board (nw_wifi_bhi_next, package/T970Ath11k.c) right before it is allocated, so the arena can put it at IOVA 0xa0000000 as stage 5
 # did. ath11k's RDDM table (nine 512 KiB segments, allocated earlier by mhi_prepare_for_power_up) otherwise takes that spot (int6).

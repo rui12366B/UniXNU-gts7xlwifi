@@ -19,7 +19,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('log', help='latest.txt or slots.txt from read-boot-log.py')
     ap.add_argument('--out', default='camera-thumb.pgm')
-    ap.add_argument('--scale', type=int, default=8, help='integer upscale (nearest neighbour)')
+    ap.add_argument('--scale', type=int, default=8, help='integer upscale (nearest neighbour); 1 = the raw 64x48')
     args = ap.parse_args()
     rows, best = {}, None
     for line in open(args.log, encoding='latin1'):

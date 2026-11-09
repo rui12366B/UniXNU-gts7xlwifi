@@ -1083,6 +1083,17 @@ static void hostWrite (unsigned offset, uint32_t value)
   __asm__ volatile ("dsb sy" ::: "memory");
 }
 
+// Busy-wait `us` microseconds by the counter: no timer, no thread_block (see RootCommands.h,
+// poll pacing). Preemption stays enabled; the caller may hold gHost.lock.
+static void ufsSpinPause (uint32_t us)
+{
+  uint64_t until;
+  clock_interval_to_deadline (us, kMicrosecondScale, &until);
+  while (mach_absolute_time () < until) {
+    __asm__ volatile ("yield" ::: "memory");
+  }
+}
+
 #include "RootQueue.h"
 
 #include "RootCommands.h"
@@ -1991,6 +2002,31 @@ extern "C" void native_ufs_progress_text (char *out, size_t size)
   sample.reads = native_ufs_block_reads;
   sample.failures = native_ufs_block_failures;
   formatUfsRootDiagnostics (out, size, sample, "cached values; not a new HW fault sample", "UFS CACHED SNAPSHOT");
+}
+
+// Polled-transport counters, one row for the board log. Same contract as above: cached software
+// values only, no lock, no MMIO, safe while a command is in flight. inflight/held are the ages of
+// the command now on the wire and of the current gHost.lock hold (0 = none); a value that keeps
+// growing from one slot to the next is a transfer that is not coming back.
+extern "C" int native_ufs_poll_text (char *out, size_t size)
+{
+  if (!out || !size) return 0;
+  const UfsPollStats s = gUfsPoll;
+  const uint64_t now = mach_absolute_time ();
+  auto us = [] (uint64_t ticks) -> unsigned long long {
+    uint64_t ns = 0;
+    absolutetime_to_nanoseconds (ticks, &ns);
+    return static_cast<unsigned long long> (ns / 1000);
+  };
+  const uint64_t inflight = s.inflightSince && now > s.inflightSince ? now - s.inflightSince : 0;
+  const uint64_t held = s.lockHeldSince && now > s.lockHeldSince ? now - s.lockHeldSince : 0;
+  return snprintf (out, size,
+                   "[ufs poll] cmds=%llu slow=%llu sleeps=%llu max=%lluus to=%u fatal=%u | lock wait=%lluus log=%lluus "
+                   "hold=%lluus logw=%u | now inflight=%lluus op=%02x held=%lluus poisoned=%d",
+                   static_cast<unsigned long long> (s.commands), static_cast<unsigned long long> (s.slowCommands),
+                   static_cast<unsigned long long> (s.sleeps), us (s.maxTicks), s.timeouts, s.fatals,
+                   us (s.lockWaitMax), us (s.logLockWaitMax), us (s.lockHoldMax), s.logWrites,
+                   us (inflight), s.inflightOpcode & 0xff, us (held), gHost.poisoned ? 1 : 0);
 }
 #else
 volatile uint32_t native_ufs_blocks_published = 0;
