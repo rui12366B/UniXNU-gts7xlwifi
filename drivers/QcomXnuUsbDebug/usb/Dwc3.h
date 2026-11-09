@@ -45,6 +45,10 @@ struct dwc3_platform {
                      enum dwc3_sync_direction direction);
     void (*barrier)(void *cookie);
     void (*trace)(void *cookie, enum dwc3_trace event, uint32_t a, uint32_t b);
+    /* Nonzero: the platform runs a SuperSpeed PHY that clocks the core's PIPE interface. The core then asks for SuperSpeed
+     * (DCFG) and answers a SuperSpeed connection with USB 3.2 descriptors; a USB 2 cable still connects at high speed with the
+     * unchanged USB 2 descriptors. Zero keeps the high-speed-only behaviour. */
+    uint32_t superspeed;
 };
 
 struct dwc3;

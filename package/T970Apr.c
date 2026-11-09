@@ -123,10 +123,15 @@ static void channel_map(W *w, uint16_t channels)
 
 uint32_t apr_adm_open(uint8_t *out, uint32_t token, uint16_t port, uint32_t rate, uint16_t channels, uint16_t bits)
 {
+    return apr_adm_open_path(out, token, port, 1, rate, channels, bits);
+}
+
+uint32_t apr_adm_open_path(uint8_t *out, uint32_t token, uint16_t port, uint16_t path, uint32_t rate, uint16_t channels, uint16_t bits)
+{
     W w;
     begin(&w, out, APR_SVC_ADM, port, token, ADM_CMD_DEVICE_OPEN_V5);
     put16(&w, 0);                 /* legacy device session */
-    put16(&w, 1);                 /* playback (RX) path */
+    put16(&w, path);              /* 1 playback (RX), 2 capture (TX) */
     put16(&w, port); put16(&w, 0xffff);
     put32(&w, ADM_NULL_COPP_TOPOLOGY);
     put16(&w, channels); put16(&w, bits); put32(&w, rate);
@@ -144,9 +149,14 @@ uint32_t apr_adm_close(uint8_t *out, uint32_t token, uint16_t port, uint16_t cop
 
 uint32_t apr_adm_map(uint8_t *out, uint32_t token, uint16_t session, uint16_t copp)
 {
+    return apr_adm_map_matrix(out, token, ADM_MATRIX_ID_AUDIO_RX, session, copp);
+}
+
+uint32_t apr_adm_map_matrix(uint8_t *out, uint32_t token, uint32_t matrix, uint16_t session, uint16_t copp)
+{
     W w;
     begin(&w, out, APR_SVC_ADM, 0, token, ADM_CMD_MATRIX_MAP_V5);
-    put32(&w, 0);                 /* matrix: audio RX */
+    put32(&w, matrix);
     put32(&w, 1);                 /* one session */
     put16(&w, session); put16(&w, 1);
     put16(&w, copp); put16(&w, 0);
@@ -212,6 +222,48 @@ uint32_t apr_asm_write(uint8_t *out, uint16_t session, uint32_t token, uint64_t 
     return finish(&w);
 }
 
+/* AFE_PARAM_ID_CODEC_DMA_CONFIG: minor 1, rate, bit width, data format 0 (linear PCM), channels, active channel (decimator) mask. */
+uint32_t apr_afe_cdc_dma(uint8_t *out, uint32_t token, uint16_t port, uint32_t rate, uint16_t bits, uint16_t channels, uint16_t mask)
+{
+    W w;
+    param_begin(&w, out, token, port, AFE_MODULE_AUDIO_DEV_INTERFACE, AFE_PARAM_ID_CODEC_DMA_CONFIG, 16);
+    put32(&w, 1); put32(&w, rate); put16(&w, bits); put16(&w, 0); put16(&w, channels); put16(&w, mask);
+    return finish(&w);
+}
+
+uint32_t apr_asm_open_read(uint8_t *out, uint16_t session, uint16_t bits)
+{
+    W w;
+    begin(&w, out, APR_SVC_ASM, stream_port(session), session, ASM_STREAM_CMD_OPEN_READ_V3);
+    put32(&w, 0);                 /* legacy stream session, no time stamps */
+    put32(&w, 0);                 /* source: device matrix */
+    put32(&w, ASM_NULL_POPP_TOPOLOGY);
+    put32(&w, ASM_FMT_MULTI_CHANNEL_PCM_V2);
+    put16(&w, bits); put16(&w, 0);
+    return finish(&w);
+}
+
+/* ASM_STREAM_CMD_SET_ENCDEC_PARAM / ENC_CFG_BLK_V2 with the PCM block (q6asm_enc_cfg_blk_pcm_v2): param size 28 (frames per buffer,
+ * block size 20, then the 20-byte PCM block), frames per buffer 0. */
+uint32_t apr_asm_enc_pcm(uint8_t *out, uint16_t session, uint32_t rate, uint16_t channels, uint16_t bits)
+{
+    W w;
+    begin(&w, out, APR_SVC_ASM, stream_port(session), session, ASM_STREAM_CMD_SET_ENCDEC_PARAM);
+    put32(&w, ASM_PARAM_ID_ENCDEC_ENC_CFG_BLK_V2); put32(&w, 28);
+    put32(&w, 0); put32(&w, 20);
+    put16(&w, channels); put16(&w, bits); put32(&w, rate); put16(&w, 1); put16(&w, 0);
+    channel_map(&w, channels);
+    return finish(&w);
+}
+
+uint32_t apr_asm_read(uint8_t *out, uint16_t session, uint32_t token, uint64_t address, uint32_t handle, uint32_t bytes, uint32_t seq)
+{
+    W w;
+    begin(&w, out, APR_SVC_ASM, stream_port(session), token, ASM_DATA_CMD_READ_V2);
+    put32(&w, (uint32_t)address); put32(&w, (uint32_t)(address >> 32)); put32(&w, handle); put32(&w, bytes); put32(&w, seq);
+    return finish(&w);
+}
+
 int apr_parse(const uint8_t *in, uint32_t length, AprAnswer *a)
 {
     for (unsigned i = 0; i < sizeof *a; ++i) ((uint8_t *)a)[i] = 0;
@@ -252,6 +304,11 @@ int apr_parse(const uint8_t *in, uint32_t length, AprAnswer *a)
         if (n < 16) return AprBad;
         a->address = le32(d) | (uint64_t)le32(d + 4) << 32; a->value = le32(d + 8); a->status = le32(d + 12);
         return AprWriteDone;
+    case ASM_DATA_EVENT_READ_DONE_V2:   /* status, address lo/hi, handle, size, offset, time stamp lo/hi, flags, frames */
+        if (n < 36) return AprBad;
+        a->status = le32(d); a->address = le32(d + 4) | (uint64_t)le32(d + 8) << 32; a->value = le32(d + 12);
+        for (unsigned i = 0; i < 5; ++i) a->words[i] = le32(d + 16 + 4 * i);
+        return AprReadDone;
     case AFE_CMD_HW_VOTE_RSP:
         if (n < 4) return AprBad;
         a->status = le32(d);

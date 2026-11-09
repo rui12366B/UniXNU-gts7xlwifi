@@ -998,6 +998,9 @@ void native_legacy_display_late_probe(void) {
 	// Bluetooth: the QCA6390's Bluetooth side over QUP0 SE6 (package/T970Bluetooth.cpp, t970-bt=<bits>, off by default); own thread.
 	extern void t970_bluetooth_start(void) __attribute__((weak_import));
 	if (&t970_bluetooth_start) t970_bluetooth_start();
+	// S Pen: the Wacom W9021 over GPIO I2C 52/53 (package/T970Pen.cpp, t970-pen=<bits>, off by default); own thread.
+	extern void t970_pen_start(void) __attribute__((weak_import));
+	if (&t970_pen_start) t970_pen_start();
 
 	// The AppleKeyStore stand-in. Same reason as the HID publisher: a selected component that
 	// nothing references is dropped from a static link, and without it there is no keybag to

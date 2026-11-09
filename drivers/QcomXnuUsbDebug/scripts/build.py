@@ -124,7 +124,11 @@ def main():
                    # Optional: the board's own reset path, which maps the IMEM window with
                    # the attributes the bootloader accepts. Weak, so a board without it
                    # still links and falls back to this module's plain PSCI reset.
-                   '_boot_reset_bootloader'}
+                   '_boot_reset_bootloader',
+                   # Optional, gts7xlwifi t970-ss: the MAX77705 CC state the board's MUIC route records (lane
+                   # select) and the board's RPMh regulator vote (QMP PHY supplies). Weak; without them the
+                   # console stays at high speed.
+                   '_t970_muic', '_t970_rpmh_write'}
         if external - allowed:
             raise RuntimeError('unexpected XNU imports: ' + str(sorted(external - allowed)))
         required = {'_qcom_usb_debug_' + s for s in

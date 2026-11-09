@@ -46,6 +46,24 @@ uint32_t native_aks_lock_state(void) {
     }
     return (uint32_t)cached;
 }
+// AppleKeyStoreState (8c70daf+) wraps keychain class keys in software, keyed from this identity. It must be the same at every
+// boot or existing keychain items cannot be unwrapped again, so it is /chosen/unique-chip-id (set by the payload's ADT), as
+// upstream's porting guide prescribes. Read at run time: nothing device-specific is compiled in. Returns 0 if it is missing,
+// and the component then refuses wrap/unwrap (kAksError) rather than using a weak key.
+size_t native_aks_device_id(uint8_t *out, size_t capacity) {
+    if (!out || !capacity) return 0;
+    IORegistryEntry *chosen = IORegistryEntry::fromPath("/chosen", gIODTPlane);
+    if (!chosen) return 0;
+    OSData *data = OSDynamicCast(OSData, chosen->getProperty("unique-chip-id"));
+    size_t n = 0;
+    if (data && data->getLength() > 0) {
+        n = data->getLength() < capacity ? data->getLength() : capacity;
+        memcpy(out, data->getBytesNoCopy(), n);
+    }
+    OSSafeReleaseNULL(chosen);
+    printf("AKS device id %s (%u bytes)\n", n ? "from /chosen/unique-chip-id" : "MISSING", (unsigned)n);
+    return n;
+}
 static void aks_publish(void) {
     // Slot 0: counters; slot 1: selector:count tokens ('e' = the last answer was an error). Slots 2-3 belong to the Data store.
     char row[48];

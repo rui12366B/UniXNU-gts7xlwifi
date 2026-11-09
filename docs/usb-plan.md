@@ -164,8 +164,10 @@ The QMP table is generated from the pinned Linux tree, not copied from the vendo
 - tx, rx, pcs, pcs_usb: `sm8250_usb3_*_tbl`
 - PCS register names: `QPHY_V4_PCS_*`
 
-The live FDT's `qcom,qmp-phy-init-seq` is used only as a read-only cross-check: the generator prints any offset/value pair that
-differs.
+The live FDT's `qcom,qmp-phy-init-seq` is used only as a read-only cross-check. Done (§3): `scripts/gen-qmp-sm8250-usb3.py`
+writes `drivers/QcomXnuUsbDebug/soc/Sm8250QmpUsb3.h`, 140 writes, and the register offsets match the FDT's `qcom,qmp-phy-reg-offset`.
+134 writes are the same as the FDT sequence. The other six are tuning values: RX 0x157c/0x197c (7f vs ff), 0x1594/0x1994 (b4 vs b6),
+and PCS LOCK_DETECT_CONFIG1/2 0x1cc4/0x1cc8 (d0/07 vs c4/89). QcomDwc3 step 4 includes the same header.
 
 ### 2.3 Layering (what is reused and what is new)
 
@@ -274,4 +276,65 @@ The first test image each time is built and flashed by the coordinating session.
 | `package/T970Battery.cpp`, `package/BootLog.c` (battery row) | 1 (done) |
 | `scripts/gen-usb17-abi.py`, `scripts/usb-abi-21H461.json` | 2.1 (done) |
 | `docs/usb-plan.md` | this plan |
-| `drivers/QcomDwc3/` (new component checkout, SM8250 port), `package/T970Usb.cpp`, `board.toml` prelink roots and recipe, `scripts/gen-qmp-usb3-table-sm8250.py` | 2.3–2.7 (next) |
+| `scripts/gen-qmp-sm8250-usb3.py`, `drivers/QcomXnuUsbDebug/{soc/Sm8250QmpUsb3.h, kernel/QcomXnuUsbDebug.c, usb/Dwc3.[ch], scripts/build.py, tests/test_dwc3.c}`, `package/BootLog.c` (`[qud ss]` row) | 3 (READY, not booted) |
+| `drivers/QcomDwc3/` (new component checkout, SM8250 port), `package/T970Usb.cpp`, `board.toml` prelink roots and recipe | 2.3–2.7 (next) |
+
+## 3. USB 3 now: SuperSpeed for the CDC-ACM debug console (`t970-ss`, READY, not booted)
+
+Upstream (UniXNU main and FFT-infra QcomDwc3 e4efe95) runs USB 3 only inside QcomDwc3 for SM8550: `QcomQmpUsb3.h`, generated from
+Linux; `qmpInit` (DP_COM software port select and the table); DCFG left at SuperSpeed; descriptors from Apple's stack. Two parts
+carry over unchanged in method: the QMP COM/PCS sequence and the generator. The DCFG and descriptor parts do not, because Apple's
+stack builds its own descriptors. The faster debug link the user wants is the console (QcomXnuUsbDebug), which already runs on this
+board and does not wait for QcomDwc3 steps 0–3. So USB 3 goes there first, on the console's existing hand-off path.
+
+**Bring-up** (`qcom_usb_debug_t970_retry` → `t970_hsphy_init` → `t970_ssphy_init`, only when `t970-ss` bit 0 is set):
+
+1. Supplies through `t970_rpmh_write` (weak): ldoa9 1.2 V (QMP core, FDT core-supply `pm8150_l9`) and ldoa18 0.912 V (vdd,
+   `pm8150_l18`). Each gets voltage, HPM and enable. If any vote fails, no SuperSpeed attempt is made.
+2. GCC: assert and release USB3_DP_PHY_PRIM_BCR 0x50008 and USB3_PHY_PRIM_BCR 0x50000. Set the aux RCG 0xf064/0xf068 to XO
+   19.2 MHz. Enable the aux 0xf054, com_aux 0xf058 and pipe 0xf05c branches.
+3. Lane select from the MAX77705, not a GPIO. The source is `CC_STATUS0` CCPinStat, which `routeUsb` stores in `t970_muic[6]`
+   before the retry runs: 1 = CC1, normal; 2 = CC2, reverse. `t970-ss` bit 1 inverts the result, in case this board wires CC1/CC2
+   opposite to the lanes. TLMM 65 (`samsung,cc_dir`) and every PM8150B Type-C register are left alone. This board's CC controller
+   is the MAX77705, so PM8150B's typec block is not the cable source here.
+4. QMP, as Linux `qmp_combo_com_init` and `qmp_combo_usb_power_on` (USB3-only mode):
+   - COM: power, reset override, `TYPEC_CTRL = SW_PORTSELECT_MUX | rev`, `PHY_MODE_CTRL = USB3_MODE`, then out of reset.
+   - The 140 table writes, then the PCS `SW_RESET` released and SERDES|PCS start.
+   - Wait for `PCS_STATUS1.PHYSTATUS` to clear, up to 200 ms.
+5. On success, QSCRATCH GENERAL_CFG does not select UTMI as the PIPE clock (bits 0 and 3 are cleared). On any failure the console
+   keeps exactly today's high-speed path.
+6. The gadget gets `platform.superspeed = 1`:
+   - DCFG SuperSpeed; GUSB3PIPECTL.SUSPHY cleared (the PIPE PHY stays awake, as the USB2 PHY already does).
+   - On a SuperSpeed CONNECTDONE: EP0 512, bulk 1024, bcdUSB 3.2 with bMaxPacketSize0 9, a BOS (USB 2.0 extension + SS
+     capability), and SS endpoint companions (config 85 bytes).
+   - SET_SEL (a 6-byte OUT stage in a 512-byte TRB), SET_ISOCH_DELAY, U1/U2/LTM enables (accepted, left off) and
+     FUNCTION_SUSPEND.
+   - Device qualifier and other-speed requests stall at SuperSpeed.
+   - A USB 2 cable still trains at high speed and gets the unchanged USB 2 descriptors.
+
+**Boot args:** add `t970-ss=1` to the line. Use `t970-ss=3` if `[qud ss]` reaches step 104 but `[qud retry]` dsts stays at speed 0 on
+a USB 3 cable, which would mean the lane select is inverted. `qcom-usb-debug=1` and `t970-qud-retry=1` stay as they are.
+
+**Log:**
+- `[qud ss] step %x arg cc0 rev pcs polls aux com pipe rails`:
+  - step 104 = PHY running.
+  - -2 = no MUIC data; -3 = no CC orientation (CCPinStat 0/3); -4 = an aux branch is gated; -5 = PHYSTATUS did not clear (pcs
+    shows bit 6).
+- `[qud retry] dsts`: low 3 bits 4 = SuperSpeed, 0 = high speed.
+- On the Mac: `system_profiler SPUSBDataType` shows the CDC device at "Up to 5 Gb/s".
+
+**Checked here:**
+- All five module units pass `-fsyntax-only` with the build's own recipe (pe_kprintf compile record, `scripts/build.py` flags).
+  The 3 warnings are pre-existing.
+- `BootLog.c` and `T970Battery.cpp` pass the kernel flags.
+- `tests/test_dwc3.c` passes every existing high-speed case plus a new SuperSpeed case: DCFG, SUSPHY, EP0 512 / bulk 1024,
+  bcdUSB 3.2, BOS, three companions, SET_SEL, U1/U2, SET_CONFIGURATION, line coding unchanged.
+- The module's import allowlist (`scripts/build.py`) gains the two weak board symbols `_t970_muic` and `_t970_rpmh_write`.
+
+**Not done / limits:**
+- Not booted.
+- The console's transfer size is still 4 KiB per TRB with a 16 KiB TX ring, so the polled loop, not the link, will cap
+  throughput. Larger SS buffers are a follow-up once the link is seen.
+- Host mode is not in the console (it has no xHCI). It belongs to QcomDwc3 step 5, which reuses this PHY bring-up with the
+  femto host override sequence and the MAX77705 OTG boost.
+

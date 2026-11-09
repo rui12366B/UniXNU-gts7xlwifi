@@ -747,6 +747,91 @@ static void t970_wait_us(uint64_t frequency, uint64_t us)
     while (counter() - t0 < span) __asm__ volatile("yield" ::: "memory");
 }
 static vm_offset_t t970_phy_va;   /* mapped by qcom_usb_debug_t970_retry with interrupts on */
+
+/* gts7xlwifi: SuperSpeed for the console, opt-in with t970-ss (bit 0 on, bit 1 inverts the lane select). The QMP USB3/DP combo
+ * PHY (usb_qmp_dp_phy, 0x088e8000, status okay in the board's FDT) in USB3-only mode, as Linux phy-qcom-qmp-combo.c
+ * qmp_combo_com_init + qmp_combo_usb_power_on for sm8250_usb3dpphy_cfg; the table is soc/Sm8250QmpUsb3.h, generated from Linux.
+ * Supplies: ldoa9 1.2 V (core) and ldoa18 0.912 V (vdd), voted by the retry. Clocks: GCC usb3_prim_phy_aux (RCG 0xf064 from XO),
+ * com_aux, pipe; resets USB3_DP_PHY_PRIM_BCR 0x50008 and USB3_PHY_PRIM_BCR 0x50000. The lane select is software (COM TYPEC_CTRL),
+ * from the MAX77705's CC_STATUS0 CCPinStat that the MUIC route records (t970_muic[6] >> 8, bits 7:6: 1 CC1, 2 CC2) -- no GPIO
+ * (the board's samsung,cc_dir is tlmm 65; it is not read). When the PHY does not start, the console stays at high speed with the
+ * UTMI clock as its PIPE clock, as before.
+ * t970_qud_ss: [0] step (negative: failed) | 0x100 done, [1] t970-ss | cc_status0 << 8 | reverse << 16, [2] PCS status,
+ * [3] aux CBCR, [4] com_aux CBCR, [5] pipe CBCR, [6] polls, [7] rails rc (ldoa9 | ldoa18 << 8),
+ * [8] SS link states seen while enumerating: bit n set when GDBGLTSSM (0xc164) bits 25:22 read n (DSTS USBLNKST encoding:
+ * 4 SS.Disabled, 5 RxDetect, 6 SS.Inactive, 7 Polling, 8 Recovery, 0xa Compliance, 0 U0), [9] last GDBGLTSSM, [10] GUSB3PIPECTL,
+ * [11] samples. combo25 trained at high speed with the PHY up: RxDetect only = no far-end SS receiver (USB 2 cable or wrong lane),
+ * Polling then SS.Disabled = the receiver was there but training failed. */
+volatile int32_t t970_qud_ss[12];
+static uint32_t t970_ss_bits, t970_ss_on;
+static void t970_ss_sample(void)
+{
+    if (!t970_ss_on || !native.usb_va) return;
+    const volatile uint32_t *u = (const volatile uint32_t *)(uintptr_t)native.usb_va;
+    uint32_t l = u[0xc164u / 4];
+    t970_qud_ss[8] = (int32_t)((uint32_t)t970_qud_ss[8] | 1u << ((l >> 22) & 0xfu));
+    t970_qud_ss[9] = (int32_t)l;
+    t970_qud_ss[10] = (int32_t)u[0xc2c0u / 4];
+    t970_qud_ss[11] = (int32_t)((uint32_t)t970_qud_ss[11] + 1u);
+}
+extern volatile int32_t t970_muic[8] __attribute__((weak_import));
+extern int t970_rpmh_write(const char *name, uint32_t word, uint32_t value) __attribute__((weak_import));
+static vm_offset_t t970_qmp_va;
+#include "../soc/Sm8250QmpUsb3.h"
+static int t970_ssphy_init(uint64_t frequency)
+{
+    volatile uint32_t *gcc = (volatile uint32_t *)(uintptr_t)native.gcc_va;
+    volatile uint32_t *qmp = (volatile uint32_t *)(uintptr_t)t970_qmp_va;
+    uint32_t cc0, pin, reverse;
+    unsigned int i;
+#define T970_SET(p, off, bits) do { (p)[(off) / 4] |= (uint32_t)(bits); __asm__ volatile("dsb sy" ::: "memory"); } while (0)
+#define T970_CLR(p, off, bits) do { (p)[(off) / 4] &= ~(uint32_t)(bits); __asm__ volatile("dsb sy" ::: "memory"); } while (0)
+    if (!gcc || !qmp) { t970_qud_ss[0] = -1; return -1; }
+    if (!&t970_muic || t970_muic[0] <= 0) { t970_qud_ss[0] = -2; return -1; }
+    cc0 = ((uint32_t)t970_muic[6] >> 8) & 0xffu;
+    pin = (cc0 >> 6) & 3u;
+    if (pin != 1u && pin != 2u) { t970_qud_ss[1] = (int32_t)(t970_ss_bits | cc0 << 8); t970_qud_ss[0] = -3; return -1; }
+    reverse = (pin == 2u) ^ ((t970_ss_bits >> 1) & 1u);
+    t970_qud_ss[1] = (int32_t)(t970_ss_bits | cc0 << 8 | reverse << 16);
+    t970_qud_ss[0] = 1;
+    /* Resets, asserted together and released (msm8996_usb3phy_reset_l: phy, common). */
+    T970_SET(gcc, 0x50008u, 1u); T970_SET(gcc, 0x50000u, 1u); t970_wait_us(frequency, 100);
+    T970_CLR(gcc, 0x50000u, 1u); T970_CLR(gcc, 0x50008u, 1u); t970_wait_us(frequency, 100);
+    /* Aux clock source: XO, no divider (ftbl_gcc_ufs_card_phy_aux_clk_src, 19.2 MHz), then update. */
+    gcc[0xf068u / 4] = 0; __asm__ volatile("dsb sy" ::: "memory");
+    T970_SET(gcc, 0xf064u, 1u);
+    for (i = 0; i < 1000 && (gcc[0xf064u / 4] & 1u); ++i) t970_wait_us(frequency, 1);
+    T970_SET(gcc, 0xf054u, 1u); T970_SET(gcc, 0xf058u, 1u); T970_SET(gcc, 0xf05cu, 1u);
+    t970_wait_us(frequency, 50);
+    t970_qud_ss[3] = (int32_t)gcc[0xf054u / 4]; t970_qud_ss[4] = (int32_t)gcc[0xf058u / 4]; t970_qud_ss[5] = (int32_t)gcc[0xf05cu / 4];
+    if ((gcc[0xf054u / 4] | gcc[0xf058u / 4]) & 0x80000000u) { t970_qud_ss[0] = -4; return -1; }
+    t970_qud_ss[0] = 2;
+    /* qmp_combo_com_init, USB3-only. */
+    T970_SET(qmp, kQmpComPower, 1u);                                   /* SW_PWRDN */
+    T970_SET(qmp, kQmpComResetOvrd, 0xfu);                             /* SW_DPPHY/USB3PHY_RESET(_MUX) */
+    qmp[kQmpComTypec / 4] = 1u << 1 | reverse; __asm__ volatile("dsb sy" ::: "memory");   /* SW_PORTSELECT_MUX | VAL */
+    qmp[kQmpComMode / 4] = 1u; __asm__ volatile("dsb sy" ::: "memory");                   /* USB3_MODE */
+    T970_CLR(qmp, kQmpComResetOvrd, 0xcu);                             /* USB3 PCS out of reset */
+    T970_CLR(qmp, kQmpComSwi, 3u);
+    T970_CLR(qmp, kQmpComReset, 1u);
+    T970_SET(qmp, kQmpPowerDown, 1u);                                  /* PCS POWER_DOWN_CONTROL: SW_PWRDN */
+    t970_qud_ss[0] = 3;
+    /* qmp_combo_usb_power_on: serdes, both lanes' TX/RX, PCS, PCS_USB; then out of reset and start. */
+    for (i = 0; i < sizeof(kQmpUsb3Init) / sizeof(kQmpUsb3Init[0]); ++i) qmp[kQmpUsb3Init[i].offset / 4] = kQmpUsb3Init[i].value;
+    __asm__ volatile("dsb sy" ::: "memory");
+    t970_wait_us(frequency, 20);                                       /* has_pwrdn_delay */
+    T970_CLR(qmp, kQmpReset, 1u);
+    T970_SET(qmp, kQmpStart, 3u);                                      /* SERDES_START | PCS_START */
+    for (i = 0; i < 1000 && (qmp[kQmpStatus / 4] & (1u << 6)); ++i) t970_wait_us(frequency, 200);   /* PHYSTATUS */
+    t970_qud_ss[6] = (int32_t)i;
+    t970_qud_ss[2] = (int32_t)qmp[kQmpStatus / 4];
+    if (qmp[kQmpStatus / 4] & (1u << 6)) { t970_qud_ss[0] = -5; return -1; }
+#undef T970_SET
+#undef T970_CLR
+    t970_qud_ss[0] = 4 | 0x100;
+    return 0;
+}
+
 static int t970_hsphy_init(uint64_t frequency)
 {
     volatile uint32_t *gcc = (volatile uint32_t *)(uintptr_t)native.gcc_va;
@@ -788,8 +873,13 @@ static int t970_hsphy_init(uint64_t frequency)
      * and PIPE3_PHYSTATUS_SW (bit 3) set, PIPE_UTMI_CLK_DIS cleared, 100 us apart. [12] reads GENERAL_CFG back. */
     {
         volatile uint32_t *cfg = (volatile uint32_t *)(uintptr_t)(native.usb_va + 0xf8800u + 0x08u);
+        /* t970-ss: with the QMP PHY running, the core takes its real PIPE clock: the same disable/select/enable steps with
+         * PIPE_UTMI_CLK_SEL and PIPE3_PHYSTATUS_SW cleared instead of set. */
+        t970_ss_on = (t970_ss_bits & 1u) && t970_ssphy_init(frequency) == 0;
         *cfg |= 1u << 8;  __asm__ volatile("dsb sy" ::: "memory"); t970_wait_us(frequency, 100);
-        *cfg |= 1u << 0 | 1u << 3; __asm__ volatile("dsb sy" ::: "memory"); t970_wait_us(frequency, 100);
+        if (t970_ss_on) *cfg &= ~(1u << 0 | 1u << 3);
+        else *cfg |= 1u << 0 | 1u << 3;
+        __asm__ volatile("dsb sy" ::: "memory"); t970_wait_us(frequency, 100);
         *cfg &= ~(1u << 8); __asm__ volatile("dsb sy" ::: "memory"); t970_wait_us(frequency, 100);
         t970_qud_phy[12] = (int32_t)*cfg;
         /* periph8: ACTIVE but no USB event (ev 0): the host never saw a device, because nothing says VBUS is present. Linux
@@ -917,7 +1007,9 @@ int qcom_usb_debug_init(void)
     if (result == QusbClockOff) {
         int resume = 0;
         static const QUSB_U32 cbcr[5] = QUD_GCC_CBCR_OFFSETS;
-        if (PE_parse_boot_argn("t970-qud-resume", &resume, sizeof(resume)) && resume == 1) {
+        /* combo24c: a boot line without t970-qud-resume=1 stopped here (qcom 3) and never reached the PHY or t970-ss. The late
+         * retry cannot work without this step on this board, so the retry implies it; the boot arg still enables it alone. */
+        if (t970_qud_phy_wanted || (PE_parse_boot_argn("t970-qud-resume", &resume, sizeof(resume)) && resume == 1)) {
             /* physical_write() refuses GCC on purpose, so this goes through the GCC window init mapped above. The mock UTMI
              * branch (0xf01c) runs from RCG 0xf038 (CFG 0xf03c: TCXO, no divider) through the post-divider 0xf050 (/1); the
              * source is set first, as gcc-kona.c chains them. 2026-11-05 periph2: only that branch was gated (cbcr 80000000). */
@@ -1025,6 +1117,7 @@ int qcom_usb_debug_init(void)
     platform.read32 = core_read; platform.write32 = core_write;
     platform.delay_us = delay_us; platform.dma_sync = dma_sync;
     platform.barrier = barrier; platform.trace = core_trace;
+    platform.superspeed = t970_ss_on;
     native.core = (struct dwc3 *)(void *)usb_context;
     diag_checkpoint(QCOM_USB_DEBUG_DIAG_CORE_INIT);
     ret = dwc3_init(usb_context, sizeof(usb_context), &platform, &identity, usb_dma,
@@ -1064,6 +1157,7 @@ int qcom_usb_debug_init(void)
                 (void)restore_after_failure(); ret = 0; goto out;
             }
             if (native.status.poll_calls == 1u) diag_checkpoint(QCOM_USB_DEBUG_DIAG_FIRST_POLL);
+            t970_ss_sample();
             if (dwc3_ready(native.core)) break;
             delay_us(0, 100);
         }
@@ -1717,9 +1811,34 @@ int qcom_usb_debug_t970_retry(void)
     if (!native.gcc_va) native.gcc_va = ml_io_map((vm_offset_t)QUSB_GCC_BASE, GCC_BYTES);
     if (!native.usb_va) native.usb_va = ml_io_map((vm_offset_t)QUSB_DWC3_BASE, USB_BYTES);
     if (!native.smmu_va) native.smmu_va = ml_io_map((vm_offset_t)QUSB_SMMU_BASE, QUSB_SMMU_BYTES);
+    {
+        int ss = 0;
+        if (PE_parse_boot_argn("t970-ss", &ss, sizeof(ss)) && (ss & 1)) {
+            /* The QMP PHY's supplies (usb_qmp_dp_phy core-supply pm8150_l9 1.2 V, vdd-supply pm8150_l18 0.912 V): voltage, HPM, on. */
+            static const struct {const char *name; uint32_t mv;} rails[2] = {{"ldoa9", 1200}, {"ldoa18", 912}};
+            uint32_t rcs = 0;
+            t970_ss_bits = (uint32_t)ss;
+            t970_qud_ss[1] = (int32_t)(uint32_t)(ss & 0xff);   /* the [qud ss] row then shows even when the PHY step is not reached */
+            for (unsigned int i = 0; i < 2; ++i) {
+                int rc = &t970_rpmh_write ? t970_rpmh_write(rails[i].name, 0, rails[i].mv) : -100;
+                if (!rc) rc = t970_rpmh_write(rails[i].name, 8, 7);
+                if (!rc) rc = t970_rpmh_write(rails[i].name, 4, 1);
+                rcs |= (uint32_t)(rc & 0xff) << (8 * i);
+            }
+            t970_qud_ss[7] = (int32_t)rcs;
+            if (rcs) t970_ss_bits = 0;   /* no supplies, no SuperSpeed attempt */
+            if (!t970_qmp_va) t970_qmp_va = ml_io_map((vm_offset_t)0x088e8000ULL, 0x3000);
+            {
+                uint64_t f;
+                __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f));
+                t970_wait_us(f, 1000);   /* supplies settle */
+            }
+        }
+    }
     t970_qud_phy_wanted = 1;
     ok = qcom_usb_debug_init();
     t970_qud_phy[10] = (int32_t)(native.status.phase << 8 | native.status.error);
     t970_qud_phy[11] = native.status.core_result;
+    t970_ss_sample();
     return ok;
 }

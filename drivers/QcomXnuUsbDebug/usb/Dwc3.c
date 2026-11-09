@@ -37,10 +37,11 @@ struct dwc3 {
     uint16_t control_length;
     uint8_t control_state, control_three_stage, configured, dtr;
     uint8_t zlp_pending, running, initialized, full_speed, usb31;
+    uint8_t super_speed, control_out_kind;   /* SuperSpeed connection; 0 line coding, 1 SET_SEL data stage */
     int failed;
     uint32_t events, commands, last_event;
     uint64_t dropped;
-    uint8_t device_descriptor[18], manufacturer[64], product[64], serial[64];
+    uint8_t device_descriptor[18], device_descriptor_ss[18], manufacturer[64], product[64], serial[64];
 };
 
 _Static_assert(sizeof(struct dwc3) <= DWC3_CONTEXT_BYTES,
@@ -66,6 +67,32 @@ static const uint8_t config_hs[] = {CONFIG_BYTES(0, 2, 2)};
 static const uint8_t config_fs[] = {CONFIG_BYTES(64, 0, 2)};
 static const uint8_t other_hs[] = {CONFIG_BYTES(0, 2, 7)};
 static const uint8_t other_fs[] = {CONFIG_BYTES(64, 0, 7)};
+/* SuperSpeed (USB 3.2 section 9.6): the same CDC ACM function, every endpoint followed by its SuperSpeed endpoint companion
+ * (no bursts, no streams; the interrupt endpoint's bytes per interval is its 16-byte packet), bulk packets of 1024 bytes,
+ * bMaxPower in 8 mA units (12: 96 mA). wTotalLength 67 + 3 * 6 = 85. */
+static const uint8_t config_ss[] = {
+    9, 2, 85, 0, 2, 1, 0, 0x80, 12,
+    9, 4, 0, 0, 1, 2, 2, 1, 0,
+    5, 0x24, 0, 0x10, 1,
+    5, 0x24, 1, 0, 1,
+    4, 0x24, 2, 2,
+    5, 0x24, 6, 0, 1,
+    7, 5, 0x81, 3, 16, 0, 10,
+    6, 0x30, 0, 0, 16, 0,
+    9, 4, 1, 0, 2, 0x0a, 0, 0, 0,
+    7, 5, 0x02, 2, 0, 4, 0,
+    6, 0x30, 0, 0, 0, 0,
+    7, 5, 0x82, 2, 0, 4, 0,
+    6, 0x30, 0, 0, 0, 0
+};
+/* BOS: the USB 2.0 extension (no LPM, which DCFG does not offer) and the SuperSpeed device capability: no LTM, full, high and
+ * SuperSpeed supported, full functionality from full speed, U1 exit 10 us, U2 exit 511 us (Linux dwc3's defaults). 5+7+10 = 22. */
+static const uint8_t bos_ss[] = {
+    5, 15, 22, 0, 2,
+    7, 16, 2, 0, 0, 0, 0,
+    10, 16, 3, 0, 0x0e, 0, 1, 10, 0xff, 1
+};
+_Static_assert(sizeof(config_ss) == 85 && sizeof(bos_ss) == 22, "SuperSpeed descriptor lengths");
 static const uint8_t language[] = {4, 3, 9, 4};
 /* Per-instance fixed storage; identity does not retain caller pointers. */
 static size_t identity_chars(const char *text)
@@ -245,7 +272,14 @@ const void *dwc3_descriptor(const struct dwc3 *d, unsigned type, unsigned index,
     const uint8_t *p = 0;
     size_t n = 0;
     if (!d || !d->initialized) { if (length) *length = 0; return 0; }
-    if (index == 0) {
+    if (index == 0 && d->super_speed) {
+        /* No device qualifier or other-speed configuration at SuperSpeed: those requests stall (USB 3.2 9.6.2). */
+        switch (type) {
+        case 1: p = d->device_descriptor_ss; n = sizeof(d->device_descriptor_ss); break;
+        case 2: p = config_ss; n = sizeof(config_ss); break;
+        case 15: p = bos_ss; n = sizeof(bos_ss); break;
+        }
+    } else if (index == 0) {
         switch (type) {
         case 1: p = d->device_descriptor; n = sizeof(d->device_descriptor); break;
         case 2: p = fs ? config_fs : config_hs; n = sizeof(config_hs); break;
@@ -315,7 +349,21 @@ static int setup_request(struct dwc3 *d)
     } else if (s[0] == 0xa1 && s[1] == 0x21 && index == 0 && value == 0 && length == 7) {
         reply = d->line_coding; n = 7; ok = 1;
     } else if (s[0] == 0x21 && s[1] == 0x20 && index == 0 && value == 0 && length == 7) {
+        d->control_out_kind = 0;
         d->control_length = 7; d->control_state = CTRL_OUT_WAIT; return 0;
+    } else if (d->super_speed && s[0] == 0 && s[1] == 0x30 && value == 0 && index == 0 && length == 6) {
+        /* SET_SEL: six bytes of exit latencies. They only matter for U1/U2, which this device never initiates. */
+        d->control_out_kind = 1;
+        d->control_length = 6; d->control_state = CTRL_OUT_WAIT; return 0;
+    } else if (d->super_speed && s[0] == 0 && s[1] == 0x31 && index == 0 && length == 0) {
+        ok = 1;   /* SET_ISOCH_DELAY: no isochronous endpoints */
+    } else if (d->super_speed && s[0] == 0 && (s[1] == 1 || s[1] == 3) && value >= 48 && value <= 50 &&
+               index == 0 && length == 0) {
+        /* U1_ENABLE, U2_ENABLE, LTM_ENABLE: accepted, and left off. DCTL keeps the device from initiating U1/U2 and from
+         * accepting the host's U1/U2 requests, so a polled console's link stays in U0. */
+        ok = 1;
+    } else if (d->super_speed && s[0] == 1 && s[1] == 3 && value == 0 && (index & 255u) < 2 && length == 0) {
+        ok = 1;   /* SET_FEATURE FUNCTION_SUSPEND: options taken, nothing to suspend */
     } else if (s[0] == 2 && s[1] == 1 && value == 0 && length == 0 &&
                (index == 0x81 || index == 2 || index == 0x82)) {
         unsigned ep = ((index & 15u) << 1) | ((index >> 7) & 1u);
@@ -345,7 +393,8 @@ static int control_not_ready(struct dwc3 *d, unsigned ep, unsigned status)
     case CTRL_OUT_WAIT:
         if (ep != 0 || status != DEPEVT_STATUS_CONTROL_DATA) return 0;
         d->control_state = CTRL_OUT_ACTIVE;
-        return transfer(d, 0, DWC3_TRBCTL_CONTROL_DATA, 64);
+        /* An OUT TRB covers whole packets: 64 bytes at high speed, 512 at SuperSpeed. */
+        return transfer(d, 0, DWC3_TRBCTL_CONTROL_DATA, d->super_speed ? 512u : 64u);
     case CTRL_STATUS_IN_WAIT:
         if (ep != 1 || status != DEPEVT_STATUS_CONTROL_STATUS) return 0;
         d->control_state = CTRL_STATUS_IN_ACTIVE;
@@ -368,9 +417,9 @@ static int control_complete(struct dwc3 *d, unsigned ep, uint32_t residual)
         if (ep != 1 || residual) return stall(d);
         d->control_state = CTRL_STATUS_OUT_WAIT; return 0;
     case CTRL_OUT_ACTIVE:
-        if (ep != 0 || residual != 64u - d->control_length) return stall(d);
+        if (ep != 0 || residual != (d->super_speed ? 512u : 64u) - d->control_length) return stall(d);
         sync(d, buffer(d, 0), EP_BUFFER_BYTES, DWC3_FROM_DEVICE);
-        copy(d->line_coding, buffer(d, 0), 7);
+        if (d->control_out_kind == 0) copy(d->line_coding, buffer(d, 0), 7);
         d->control_state = CTRL_STATUS_IN_WAIT; return 0;
     case CTRL_STATUS_IN_ACTIVE:
     case CTRL_STATUS_OUT_ACTIVE: return setup_phase(d);
@@ -413,12 +462,13 @@ static int device_event(struct dwc3 *d, unsigned event)
     }
     if (event == DWC3_DEVT_CONNECTDONE) {
         speed = rd(d, DWC3_DSTS) & DWC3_DSTS_CONNECTSPD;
-        if (speed != DWC3_DSTS_HIGHSPEED && speed != DWC3_DSTS_FULLSPEED1 &&
+        d->super_speed = d->io.superspeed && speed == DWC3_DSTS_SUPERSPEED;
+        if (!d->super_speed && speed != DWC3_DSTS_HIGHSPEED && speed != DWC3_DSTS_FULLSPEED1 &&
             speed != DWC3_DSTS_FULLSPEED2) return -6;
-        d->full_speed = speed != DWC3_DSTS_HIGHSPEED;
-        d->packet_size = d->full_speed ? 64 : 512;
-        if (configure_ep(d, 0, DWC3_DEPCMD_TYPE_CONTROL, 64, 1) ||
-            configure_ep(d, 1, DWC3_DEPCMD_TYPE_CONTROL, 64, 1) ||
+        d->full_speed = !d->super_speed && speed != DWC3_DSTS_HIGHSPEED;
+        d->packet_size = d->super_speed ? 1024 : d->full_speed ? 64 : 512;
+        if (configure_ep(d, 0, DWC3_DEPCMD_TYPE_CONTROL, d->super_speed ? 512 : 64, 1) ||
+            configure_ep(d, 1, DWC3_DEPCMD_TYPE_CONTROL, d->super_speed ? 512 : 64, 1) ||
             configure_ep(d, EP_IN, DWC3_DEPCMD_TYPE_BULK, d->packet_size, 1) ||
             configure_ep(d, EP_OUT, DWC3_DEPCMD_TYPE_BULK, d->packet_size, 1)) return -4;
         return setup_phase(d);
@@ -495,6 +545,9 @@ int dwc3_init(void *context, size_t context_bytes,
     d->device_descriptor[9] = (uint8_t)(identity->vid >> 8);
     d->device_descriptor[10] = (uint8_t)identity->pid;
     d->device_descriptor[11] = (uint8_t)(identity->pid >> 8);
+    /* At SuperSpeed: bcdUSB 3.2 and an EP0 packet of 2^9 = 512 bytes; the same identity. */
+    copy(d->device_descriptor_ss, d->device_descriptor, sizeof(d->device_descriptor));
+    d->device_descriptor_ss[2] = 0x20; d->device_descriptor_ss[3] = 3; d->device_descriptor_ss[7] = 9;
     string_descriptor(d->manufacturer, identity->manufacturer, manufacturer_chars);
     string_descriptor(d->product, identity->product, product_chars);
     string_descriptor(d->serial, identity->serial, serial_chars);
@@ -531,7 +584,11 @@ int dwc3_init(void *context, size_t context_bytes,
     wr(d, DWC3_GCTL, (rd(d, DWC3_GCTL) & ~(DWC3_GCTL_PRTCAPDIR(3) |
          DWC3_GCTL_GBLHIBERNATIONEN)) | DWC3_GCTL_PRTCAPDIR(DWC3_GCTL_PRTCAP_DEVICE));
     wr(d, DWC3_DCFG, (rd(d, DWC3_DCFG) & ~(DWC3_DCFG_SPEED_MASK | DWC3_DCFG_DEVADDR_MASK |
-         DWC3_DCFG_LPM_CAP)) | DWC3_DCFG_HIGHSPEED);
+         DWC3_DCFG_LPM_CAP)) | (d->io.superspeed ? DWC3_DCFG_SUPERSPEED : DWC3_DCFG_HIGHSPEED));
+    /* A polled console keeps the PIPE PHY out of suspend, as acquire_phy keeps the USB2 PHY awake (Linux
+     * snps,dis_u3_susphy_quirk). */
+    if (d->io.superspeed)
+        wr(d, DWC3_GUSB3PIPECTL(0), rd(d, DWC3_GUSB3PIPECTL(0)) & ~DWC3_GUSB3PIPECTL_SUSPHY);
     wr(d, DWC3_GEVNTADRLO(0), (uint32_t)dma_device);
     wr(d, DWC3_GEVNTADRHI(0), (uint32_t)(dma_device >> 32));
     /* Mask the event IRQ; status still accumulates for polling. */
@@ -614,6 +671,7 @@ int dwc3_recover(struct dwc3 *d)
         type = ep < 2 ? DWC3_DEPCMD_TYPE_CONTROL :
                ep == EP_NOTIFY ? DWC3_DEPCMD_TYPE_INTR : DWC3_DEPCMD_TYPE_BULK;
         mps = ep < 2 ? 64 : ep == EP_NOTIFY ? 16 : 512;
+        if (d->super_speed && ep != EP_NOTIFY) mps = ep < 2 ? 512 : 1024;   /* the connection's sizes, not the reset ones */
         (void)configure_ep(d, ep, type, mps, 0);
     }
     wr(d, DWC3_DALEPENA, 3);

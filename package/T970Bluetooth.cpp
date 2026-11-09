@@ -74,6 +74,11 @@ volatile uint32_t t970_bt_cp[3];
 // [2..5] qbt_transport_activity (power requests, boot-state reads, control connects, channel requests), [6] host->controller bytes
 // (low 32), [7] controller->host bytes (low 32).
 volatile uint32_t t970_bt_sk[8];
+// HCI trace of the UART.SK sessions (serve mode): the last 24 command/event records of the session that closed last ([0..23], oldest
+// first; [24] records in it, [25] sessions closed). A record is kind << 28 | opcode << 8 | status: kind 1 command sent by the host,
+// 2 Command Complete (status = its first return byte), 3 Command Status, 4 any other event (opcode = event code, status = 0). bluetoothd
+// restarts after a failed init step without its unified log reaching disk; this names the step.
+volatile uint32_t t970_bt_hci[26];
 // The start-up log lines (btqca's own and this file's), '|' separated, for BootLog.
 char t970_bt_text[1024];
 volatile uint32_t t970_bt_text_length;
@@ -282,7 +287,62 @@ int firmware(void *, const char *name, const uint8_t **data, size_t *size) {
 }
 void firmwarePut(void *, const uint8_t *data, size_t size) {if (data) IOFreeData(const_cast<uint8_t *>(data), size);}
 // Host-bound H4 packets: to the UART.SK pipe when serving (it retains what it cannot take), else consumed.
-size_t hostRx(void *, const uint8_t *bytes, size_t n) {return bt.serving ? qbt_transport_receive(bytes, uint32_t(n)) : n;}
+// ---- HCI trace (t970_bt_hci) ----
+struct H4Parser {uint8_t head[8]; uint32_t have, need, skip;};
+H4Parser gH2c, gC2h;
+uint32_t gRing[24], gRingAt, gRingCount;
+void record(uint32_t kind, uint32_t opcode, uint32_t status) {
+    gRing[gRingAt] = kind << 28 | (opcode & 0xfffff) << 8 | (status & 255); gRingAt = (gRingAt + 1) % 24; ++gRingCount;
+}
+void traceSnapshot() {
+    ++t970_bt_hci[25];
+    if (!gRingCount) {gH2c = {}; gC2h = {}; return;}       // keep the last session that moved any HCI (combo26: an empty one hid it)
+    const uint32_t n = gRingCount < 24 ? gRingCount : 24;
+    for (uint32_t i = 0; i < 24; ++i) t970_bt_hci[i] = i < n ? gRing[(gRingAt + 24 - n + i) % 24] : 0;
+    t970_bt_hci[24] = gRingCount;
+    gRingAt = gRingCount = 0; gH2c = {}; gC2h = {};
+}
+// H4 framing: 1 command (3-byte header, u8 length), 2 ACL (4, u16), 3 SCO (3, u8), 4 event (2, u8), 5 ISO (4, 14-bit). Only the
+// headers (plus the first 4 parameter bytes of an event) are kept; payloads are skipped.
+void trace(H4Parser &p, const uint8_t *bytes, size_t n, bool fromHost) {
+    for (size_t i = 0; i < n; ++i) {
+        const uint8_t c = bytes[i];
+        if (p.skip) {--p.skip; continue;}
+        if (!p.have) {
+            if (c < 1 || c > 5) continue;                   // lost framing: wait for a packet type
+            p.head[0] = c; p.have = 1; p.need = c == 1 || c == 3 ? 4 : c == 4 ? 7 : 5; continue;
+        }
+        p.head[p.have++] = c;
+        if (p.head[0] == 4 && p.have == 3) {                // event header complete: keep up to 4 parameter bytes
+            const uint32_t len = p.head[2];
+            p.need = 3 + (len < 4 ? len : 4);
+        }
+        if (p.have < p.need) continue;
+        const uint8_t *h = p.head;
+        uint32_t payload = 0;
+        switch (h[0]) {
+        case 1: payload = h[3]; if (fromHost) record(1, uint32_t(h[1] | h[2] << 8), 0); break;
+        case 2: payload = uint32_t(h[3] | h[4] << 8); break;
+        case 3: payload = h[3]; break;
+        case 5: payload = uint32_t(h[3] | (h[4] & 0x3f) << 8); break;
+        case 4: {
+            const uint32_t len = h[2], kept = p.have - 3;
+            payload = len - kept;
+            if (h[1] == 0x0e && kept >= 4) record(2, uint32_t(h[4] | h[5] << 8), h[6]);
+            else if (h[1] == 0x0f && kept >= 4) record(3, uint32_t(h[5] | h[6] << 8), h[3]);
+            else record(4, h[1], 0);
+            break;
+        }
+        }
+        p.have = 0; p.skip = payload;
+    }
+}
+size_t hostRx(void *, const uint8_t *bytes, size_t n) {
+    if (!bt.serving) return n;
+    const uint32_t taken = qbt_transport_receive(bytes, uint32_t(n));
+    trace(gC2h, bytes, taken, false);
+    return taken;
+}
 void log(void *, int level, const char *line) {if (level <= 6) note("%s", line);}
 
 // ---- SMMU: route stream 0x5a3 to a bypass-emulation bank (S2CR then SMR; the bank SCTLR off, CBAR S1_TRANS_S2_BYPASS) ----
@@ -687,6 +747,11 @@ void serve() {
     for (;;) {
         const uint32_t command = __atomic_exchange_n(&bt.powerRequest, 0u, __ATOMIC_ACQ_REL);
         if (command == 1) {
+            // combo26: bluetoothd exited (reason 718), launchd restarted it at once, and its BlueTool "boot" arrived inside the
+            // 500 ms close grace of the old session. The controller was still on, so this answered "on", then the pending close
+            // powered it off: the new daemon's writes failed with EIO ("os_channel_sync tx failed"), HCI Reset failed, and the
+            // stack never started (Settings: can't turn on). A power-on request cancels any pending close.
+            closeAt = 0;
             e = bt.powered ? 0 : bringUp();                 // a running controller is kept as it is (upstream)
             if (e == 1) e = -EIO;
             powerResult(true, e);
@@ -695,17 +760,34 @@ void serve() {
             bt.service = false; closeAt = 0;
             powerResult(false, 0);
         }
+        // A host on the pipe with the controller off (it closed, or failed, between that host's power-on and its connect): start it,
+        // as connecting to UART.SK does upstream. Once per connection, so a controller that fails to start is not retried in a loop.
+        static bool autoOnTried;
+        if (!bt.powered) {
+            const bool active = qbt_transport_active();
+            if (active && !autoOnTried) {
+                autoOnTried = true;
+                e = bringUp(); if (e == 1) e = -EIO;
+                note("uart.sk host connected while off: start %d", e);
+                powerResult(true, e);
+            } else if (!active) autoOnTried = false;
+        }
         if (bt.powered) {
             pump(nullptr);
             const bool active = qbt_transport_active();
             if (active != bt.service) {
                 qbt_set_service(bt.core, active); bt.service = active;
+                if (!active) traceSnapshot();               // the session that just ended: its last commands and events
                 closeAt = active ? 0 : nowNs(nullptr) + 500000000ULL;
                 note("uart.sk %s", active ? "connected" : "closed");
             }
             uint8_t tx[2048];
             size_t room = qbt_transmit_capacity(bt.core); if (room > sizeof tx) room = sizeof tx;
-            if (room) {const uint32_t n = qbt_transport_tx_take(tx, uint32_t(room)); if (n && qbt_transmit(bt.core, tx, n)) note("uart.sk tx %u dropped", n);}
+            if (room) {
+                const uint32_t n = qbt_transport_tx_take(tx, uint32_t(room));
+                if (n) trace(gH2c, tx, n, true);
+                if (n && qbt_transmit(bt.core, tx, n)) note("uart.sk tx %u dropped", n);
+            }
             qbt_step(bt.core);
             struct qbt_info info; qbt_get_info(bt.core, &info);
             if (info.state == 3 || bt.geni.state == QBT_GENI_FAILED || (closeAt && nowNs(nullptr) >= closeAt)) {

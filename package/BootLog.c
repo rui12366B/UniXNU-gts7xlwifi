@@ -162,6 +162,8 @@ extern volatile uint32_t t970_audio_bytes[12] __attribute__((weak_import));
 extern volatile uint32_t t970_audio_bst[12] __attribute__((weak_import));
 extern volatile uint32_t t970_audio_cap[8] __attribute__((weak_import));
 extern volatile uint32_t t970_audio_ab[4] __attribute__((weak_import));
+extern volatile int32_t t970_audio_mic[20] __attribute__((weak_import));
+extern volatile int32_t t970_audio_micp[4] __attribute__((weak_import));
 extern volatile int16_t t970_audio_cap_p[512] __attribute__((weak_import)), t970_audio_cap_k[512] __attribute__((weak_import));
 extern volatile uint32_t t970_audio_hal[12] __attribute__((weak_import));
 extern volatile int32_t t970_audio_service[8] __attribute__((weak_import));
@@ -194,6 +196,12 @@ extern volatile int32_t t970_bt[32] __attribute__((weak_import));
 extern char t970_bt_text[1024] __attribute__((weak_import));
 extern volatile uint32_t t970_bt_cp[3] __attribute__((weak_import));
 extern volatile uint32_t t970_bt_sk[8] __attribute__((weak_import));
+extern volatile uint32_t t970_bt_hci[26] __attribute__((weak_import));
+extern volatile int32_t t970_pen[32] __attribute__((weak_import));
+extern char t970_pen_text[768] __attribute__((weak_import));
+extern char t970_pen_last[4][64] __attribute__((weak_import));
+extern volatile uint32_t native_pen_hid[5] __attribute__((weak_import));
+extern volatile uint32_t native_hid_pen_status __attribute__((weak_import));
 extern volatile uint32_t native_swipe_stats[16] __attribute__((weak_import));
 extern volatile int32_t native_touch_extent[4] __attribute__((weak_import));
 extern volatile uint32_t native_adreno_method_stats[20][4] __attribute__((weak_import));
@@ -264,6 +272,7 @@ extern volatile uint32_t nw_wifi_wr_n __attribute__((weak_import));          // 
 extern volatile uint32_t nw_wifi_wr[512][3] __attribute__((weak_import));
 extern volatile uint32_t t970_qud_faults[16] __attribute__((weak_import));
 extern volatile int32_t t970_qud_phy[15] __attribute__((weak_import));
+extern volatile int32_t t970_qud_ss[12] __attribute__((weak_import));
 extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 extern volatile uint32_t native_touch_hid_multi[3] __attribute__((weak_import));
 extern volatile int32_t native_backlight_request[6] __attribute__((weak_import));
@@ -1051,6 +1060,15 @@ static size_t compose(char *out, size_t cap, uint32_t slot, unsigned now) {
                (unsigned)h[10], (int)h[11], (unsigned)h[12], (unsigned)h[13], (unsigned)h[14]);
       at = put(out, at, cap, row, sizeof row);
     }
+    // t970-ss: the QMP USB3 PHY attempt (QcomXnuUsbDebug t970_qud_ss). The link speed is the [qud retry] dsts low bits (4 SuperSpeed, 0 high).
+    if (&t970_qud_ss && (t970_qud_ss[0] | t970_qud_ss[1] | t970_qud_ss[7])) {
+      const volatile int32_t *s = t970_qud_ss;
+      snprintf(row, sizeof row, "[qud ss] step %s%x arg %x cc0 %x rev %u pcs %x polls %d aux %x com %x pipe %x rails %x ltssm %x seen %x pipectl %x n %u", s[0] < 0 ? "-" : "",
+               (unsigned)(s[0] < 0 ? -s[0] : s[0]),
+               (unsigned)s[1] & 0xff, ((unsigned)s[1] >> 8) & 0xff, ((unsigned)s[1] >> 16) & 1, (unsigned)s[2], (int)s[6], (unsigned)s[3],
+               (unsigned)s[4], (unsigned)s[5], (unsigned)s[7], (unsigned)s[9], (unsigned)s[8], (unsigned)s[10], (unsigned)s[11]);
+      at = put(out, at, cap, row, sizeof row);
+    }
   }
   if (&t970_qud_inherited && t970_qud_inherited[0]) {
     const volatile uint32_t *q = t970_qud_inherited;
@@ -1540,6 +1558,19 @@ static size_t compose(char *out, size_t cap, uint32_t slot, unsigned now) {
                    s[8], s[9], s[10]);
           at = put(out, at, cap, row, sizeof row);
         }
+        // Capture (on by default; t970-audio bit 8388608 turns it off): stage (negative: failed there) / error, starts, stops, reads sent / done / errors, frames,
+        // peak, resyncs, TX0_PATH_CTL, DMIC_CTL, VA core id, AFE port start, COPP, capture position minus now.
+        if (&t970_audio_mic && t970_audio_mic[2]) {
+          const volatile int32_t *m = t970_audio_mic;
+          snprintf(row, sizeof row, "[audio mic] st=%d/%d start=%d stop=%d reads=%d/%d/%d frames=%d peak=%d resync=%d path=%x dmic=%x id=%x afe=%d copp=%d pos=%d ldo=%d",
+                   m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11], m[12], m[13], m[14], m[15], m[16]);
+          at = put(out, at, cap, row, sizeof row);
+          if (&t970_audio_micp) {
+            snprintf(row, sizeof row, "[audio mic hal] reads=%d short=%d ahead=%d..%d", t970_audio_micp[0], t970_audio_micp[1],
+                     t970_audio_micp[2], t970_audio_micp[3]);
+            at = put(out, at, cap, row, sizeof row);
+          }
+        }
         // The A/B cycle (t970-audio bit 524288; 1048576 the format cycle, seg 0x11..0x16): segment now, changes, ms since the cycle
         // began at the last change, failures.
         if (&t970_audio_ab && t970_audio_ab[1]) {
@@ -1623,6 +1654,22 @@ static size_t compose(char *out, size_t cap, uint32_t slot, unsigned now) {
                (unsigned)t970_bt_sk[6], (unsigned)t970_bt_sk[7]);
       at = put(out, at, cap, skrow, sizeof skrow);
     }
+    if (&t970_bt_hci && t970_bt_hci[25]) {
+      // the last closed UART.SK session's final HCI records, oldest first: C<op> command, E<op>:<st> complete, S<op>:<st> status,
+      // V<code> other event (T970Bluetooth.cpp t970_bt_hci)
+      char hrow[400];
+      int h = snprintf(hrow, sizeof hrow, "[t970 bt hci] sessions %u records %u |", (unsigned)t970_bt_hci[25], (unsigned)t970_bt_hci[24]);
+      for (unsigned i = 0; i < 24 && h > 0 && h < (int)sizeof hrow - 16; ++i) {
+        const uint32_t r = t970_bt_hci[i];
+        if (!r) continue;
+        const unsigned kind = r >> 28, op = (r >> 8) & 0xfffff, st = r & 255;
+        if (kind == 1) h += snprintf(hrow + h, sizeof hrow - h, " C%04x", op);
+        else if (kind == 2) h += snprintf(hrow + h, sizeof hrow - h, " E%04x:%02x", op, st);
+        else if (kind == 3) h += snprintf(hrow + h, sizeof hrow - h, " S%04x:%02x", op, st);
+        else h += snprintf(hrow + h, sizeof hrow - h, " V%02x", op);
+      }
+      at = put(out, at, cap, hrow, sizeof hrow);
+    }
     if (&t970_bt_text && t970_bt_text[0]) {
       // the start-up lines in 200-byte rows
       char text[204];
@@ -1632,6 +1679,37 @@ static size_t compose(char *out, size_t cap, uint32_t slot, unsigned now) {
         snprintf(text, sizeof text, "[t970 bt log] %.*s", (int)n, t970_bt_text + o);
         at = put(out, at, cap, text, sizeof text);
       }
+    }
+  }
+  // S Pen (package/T970Pen.cpp, t970-pen): stage, query (fw, max x/y/pressure, tilt), packet counters, last coordinate, garage
+  // (pdct/hall), HID device and its counters (started, sent, refused, dropped, last result), then the start-up lines and last raw packets.
+  if (&t970_pen && t970_pen[29]) {
+    const volatile int32_t *p = t970_pen;
+    char row[360];
+    snprintf(row, sizeof row, "[t970 pen] st %d err %x pins %x fw %x mpu %x max %d/%d/%d tilt %x pk %d co %d oth %d types %x i2c %d stuck %d "
+             "xy %d,%d p %d tilt %x fl %x pdct %d/%d hall %x hov %d tip %d side %d rate %x sink %d q %x ldo %x bits %x t %d hid %u/%u/%u/%u/%u/%x",
+             (int)p[0], (unsigned)p[1], (unsigned)p[2], (unsigned)p[3], (unsigned)p[4], (int)p[5], (int)p[6], (int)p[7], (unsigned)p[8],
+             (int)p[9], (int)p[10], (int)p[11], (unsigned)p[25], (int)p[12], (int)p[28], (int)p[13], (int)p[14], (int)p[15],
+             (unsigned)p[16], (unsigned)p[17], (int)p[18], (int)p[19], (unsigned)p[20], (int)p[22], (int)p[23], (int)p[24], (int)p[31],
+             (int)p[21], (unsigned)p[26], (unsigned)p[30], (unsigned)p[29], (int)p[27],
+             &native_hid_pen_status ? native_hid_pen_status : 0u, &native_pen_hid ? native_pen_hid[0] : 0u,
+             &native_pen_hid ? native_pen_hid[1] : 0u, &native_pen_hid ? native_pen_hid[2] : 0u, &native_pen_hid ? native_pen_hid[3] : 0u,
+             &native_pen_hid ? native_pen_hid[4] : 0u);
+    at = put(out, at, cap, row, sizeof row);
+    if (&t970_pen_text && t970_pen_text[0]) {
+      char text[204];
+      for (unsigned o = 0; o < sizeof t970_pen_text && t970_pen_text[o]; o += 200) {
+        unsigned n = 0;
+        while (n < 200 && o + n < sizeof t970_pen_text && t970_pen_text[o + n]) n++;
+        snprintf(text, sizeof text, "[t970 pen log] %.*s", (int)n, t970_pen_text + o);
+        at = put(out, at, cap, text, sizeof text);
+      }
+    }
+    if (&t970_pen_last && t970_pen_last[0][0]) {
+      char text[300];
+      snprintf(text, sizeof text, "[t970 pen raw] %.64s | %.64s | %.64s | %.64s", t970_pen_last[0], t970_pen_last[1], t970_pen_last[2],
+               t970_pen_last[3]);
+      at = put(out, at, cap, text, sizeof text);
     }
   }
   // Sensors (package/T970Sensors.cpp, t970-sensors): SLPI bring-up and QRTR state, the services the hub announced, the latest

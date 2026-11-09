@@ -59,7 +59,7 @@ static void dma_sync(void *c, void *p, size_t n, enum dwc3_sync_direction dir)
     }
 }
 static void barrier(void *c) { (void)c; }
-static const struct dwc3_platform platform = {0, read32, write32, delay, dma_sync, barrier, 0};
+static const struct dwc3_platform platform = {0, read32, write32, delay, dma_sync, barrier, 0, 0};
 static struct dwc3 *dev = (void *)context;
 static const struct dwc3_identity identity = {0x1209, 0x316d, "Core test", "USB debug", "GenericDwc3"};
 static struct dwc3_trb *eptrb(unsigned ep) { return (void *)(dma + 4096 + ep * 64); }
@@ -317,5 +317,59 @@ int main(void)
     assert(delays == before_timeout + 10000 && regs[DWC3_DEVTEN / 4] == 0 && regs[DWC3_DALEPENA / 4] == 0);
     assert(regs[DWC3_GUSB2PHYCFG(0) / 4] == ((1u << 6) | (1u << 8)));
     puts("PASS: unknown core refuses before writes; stuck command exits within 10000 one-microsecond polls");
+    {
+        struct dwc3_platform ss = platform;
+        size_t n, offset;
+        const uint8_t *p;
+        unsigned companions = 0, bulk = 0;
+        timeout_commands = 0;
+        ss.superspeed = 1;
+        regs[DWC3_GUSB3PIPECTL(0) / 4] = DWC3_GUSB3PIPECTL_SUSPHY | 2u;
+        assert(dwc3_init(context, sizeof(context), &ss, &identity, dma, dma_bus, sizeof(dma)) == 0);
+        assert((regs[DWC3_DCFG / 4] & DWC3_DCFG_SPEED_MASK) == DWC3_DCFG_SUPERSPEED);
+        assert(regs[DWC3_GUSB3PIPECTL(0) / 4] == 2u);
+        assert(dwc3_start(dev) == 0);
+        regs[DWC3_DSTS / 4] = (regs[DWC3_DSTS / 4] & ~DWC3_DSTS_CONNECTSPD) | DWC3_DSTS_SUPERSPEED;
+        event(1u | (DWC3_DEVT_USBRST << 8));
+        event(1u | (DWC3_DEVT_CONNECTDONE << 8));
+        assert(dwc3_poll(dev, 32) == 2);
+        assert(((regs[DWC3_DEPCMDPAR0(1) / 4] >> 3) & 0x7ff) == 512);
+        assert(((regs[DWC3_DEPCMDPAR0(4) / 4] >> 3) & 0x7ff) == 1024);
+        setup(0x80, 6, 0x0100, 0, 18);
+        not_ready(1, DEPEVT_STATUS_CONTROL_DATA);
+        assert(eptrb(1)->size == 18 && dma[8192 + 4096 + 2] == 0x20 && dma[8192 + 4096 + 3] == 3 &&
+               dma[8192 + 4096 + 7] == 9 && dma[8192 + 4096 + 8] == 0x09 && dma[8192 + 4096 + 9] == 0x12);
+        complete(1, 0); not_ready(0, DEPEVT_STATUS_CONTROL_STATUS); complete(0, 0);
+        p = dwc3_descriptor(dev, 2, 0, 0, &n);
+        assert(n == 85 && p[2] == 85 && p[3] == 0);
+        for (offset = 0; offset < n; offset += p[offset]) {
+            assert(p[offset] >= 2 && offset + p[offset] <= n);
+            if (p[offset + 1] == 5) {
+                assert(offset + 7 < n && p[offset + 7] == 6 && p[offset + 8] == 0x30);
+                if (p[offset + 3] == 2) { bulk++; assert(p[offset + 4] == 0 && p[offset + 5] == 4); }
+            }
+            if (p[offset + 1] == 0x30) companions++;
+        }
+        assert(offset == n && companions == 3 && bulk == 2);
+        p = dwc3_descriptor(dev, 15, 0, 0, &n);
+        assert(n == 22 && p[2] == 22 && p[4] == 2 && p[5] == 7 && p[12] == 10 && p[14] == 3);
+        assert(!dwc3_descriptor(dev, 6, 0, 0, &n) && !dwc3_descriptor(dev, 7, 0, 0, &n));
+        /* SET_SEL: a whole-packet (512-byte) OUT data stage that carries six bytes and leaves the line coding alone. */
+        setup(0, 0x30, 0, 0, 6);
+        not_ready(0, DEPEVT_STATUS_CONTROL_DATA);
+        assert(eptrb(0)->size == 512);
+        memcpy(dma + 8192, "\1\2\3\4\5\6", 6); complete(0, 506);
+        status_in(DWC3_TRBCTL_CONTROL_STATUS3);
+        setup(0, 0x31, 40, 0, 0); status_in(DWC3_TRBCTL_CONTROL_STATUS2);
+        setup(0, 3, 48, 0, 0); status_in(DWC3_TRBCTL_CONTROL_STATUS2);
+        setup(0, 1, 49, 0, 0); status_in(DWC3_TRBCTL_CONTROL_STATUS2);
+        setup(0, 9, 1, 0, 0); status_in(DWC3_TRBCTL_CONTROL_STATUS2);
+        setup(1, 3, 0, 0, 0); status_in(DWC3_TRBCTL_CONTROL_STATUS2);
+        setup(0xa1, 0x21, 0, 0, 7); not_ready(1, DEPEVT_STATUS_CONTROL_DATA);
+        assert(dma[8192 + 4096] == 0 && dma[8192 + 4096 + 1] == 0xc2 && dma[8192 + 4096 + 2] == 1);
+        complete(1, 0); not_ready(0, DEPEVT_STATUS_CONTROL_STATUS); complete(0, 0);
+        assert(eptrb(4)->size == 4096u);   /* bulk OUT armed with whole 1024-byte packets */
+        puts("PASS: SuperSpeed: DCFG and PIPE suspend, EP0 512 and bulk 1024, bcdUSB 3.2, BOS, companions, SET_SEL, U1/U2");
+    }
     return 0;
 }

@@ -69,7 +69,7 @@ enum {
   kRadioInfo = 54, kScanReqMultiple = 86, kScanCacheClear = 90, kCurrentNetwork = 103, kChannelsInfo = 207, kHwSupportedChannels = 254,
 };
 // events
-enum { kEvPowerChanged = 1, kEvSsidChanged = 2, kEvBssidChanged = 3, kEvLinkChanged = 4, kEvAssocDone = 9, kEvScanDone = 10 };
+enum { kEvPowerChanged = 1, kEvSsidChanged = 2, kEvBssidChanged = 3, kEvLinkChanged = 4, kEvAssocDone = 9, kEvScanDone = 10, kEvRssiChanged = 39 };
 // results of an association, as the framework numbers them
 enum { kAssocPending = 0, kAssocOk = 1, kAssocFailed = 2, kAssocTimeout = 9, kAssocBadKey = 21 };
 
@@ -127,7 +127,15 @@ ifnet_t gIf;
 uint8_t gMac[6];
 lck_grp_t *gGrp;
 lck_mtx_t *gLock;
+bool gBpfTap = true;   // boot-arg t970-wifi-bpf=0 turns the packet-filter taps off
 bool gPower = true;
+// LINK_CHANGED carries the signal, but wifid takes every one as a fresh "link up" (a roam to the same BSSID: it restarts its usage sessions
+// each time; combo24b: 6 in 6 s after the join, and SpringBoard never got a link callback or a current network). So after a join the
+// signal goes out once, only when the join's own event had none; wifid reads it by ioctl after that. t970-wifi-linkrepeat=1 restores
+// the event on every signal change.
+bool gLinkRepeat; bool gLinkSignalPosted;
+bool gLqm = true;   // boot-arg t970-wifi-lqm=0 stops the RSSI_CHANGED (link quality) events below
+void post_rssi(int dbm);
 bool gLinkSuppressed;   // hide the old station snapshot while an explicit disconnect drains
 bool gKeyed;   // the last join used a passphrase
 uint32_t gRxFrames, gRxErrors; int gRxLastError;
@@ -243,7 +251,9 @@ void on_connect_done(int result) {
     post_event(kEvSsidChanged, nullptr, 0); post_event(kEvBssidChanged, nullptr, 0);
     nw_wifi_status st; nw_wifi_status_get(&st);
     link_event ev; memset(&ev, 0, sizeof ev); ev.rssi = st.signal_dbm; ev.noise = static_cast<uint16_t>(-95); ev.snr = st.signal_dbm > -95 ? st.signal_dbm + 95 : 0;
+    gLinkSignalPosted = st.signal_dbm < 0;
     post_event(kEvLinkChanged, &ev, sizeof ev);
+    post_rssi(st.signal_dbm);
   }
 }
 void on_link_lost(int reason) {
@@ -251,8 +261,26 @@ void on_link_lost(int reason) {
   gAssocResult = kAssocFailed;
   post_link_down(true, reason);
 }
+// APPLE80211_M_RSSI_CHANGED (39) is the link-quality event. 21H461's IO80211.framework (__dispatchlqmChangedEvent) refuses fewer than
+// 0xb8 bytes. It turns each present field into the LQM dictionary it hands wifid as event 39: byte 0 set means RSSI (int32 at +4); byte 8
+// set means per-chain RSSI (int8 at +9, +10; 0x80 = none); byte 0xb set means SNR (int16 at +0xc); byte 0xe set means noise (int16 at
+// +0x10). Fields left zero are skipped or come out zero; the counters at +0x14..+0x44 are always read. wifid's LQM sessions and the status
+// bar's signal bars come from this event, never from LINK_CHANGED: combo25/26 showed the icon with signalStrengthBars = 0, and wifid got no
+// LQM event at all.
+void post_rssi(int dbm) {
+  if (!gLqm || dbm >= 0 || dbm < -127) return;
+  uint8_t e[0xb8] = {};
+  const int32_t rssi = dbm; const int16_t noise = -95, snr = static_cast<int16_t>(dbm > -95 ? dbm + 95 : 0);
+  e[0] = 1; memcpy(e + 4, &rssi, 4);
+  e[8] = 1; e[9] = static_cast<uint8_t>(static_cast<int8_t>(dbm)); e[10] = static_cast<uint8_t>(static_cast<int8_t>(dbm));
+  e[0xb] = 1; memcpy(e + 0xc, &snr, 2);
+  e[0xe] = 1; memcpy(e + 0x10, &noise, 2);
+  post_event(kEvRssiChanged, e, sizeof e);
+}
 void on_link_update(const nw_wifi_status *status) {
   if (!gPower || gLinkSuppressed || status->state != NW_STA_UP || status->signal_dbm >= 0) return;
+  post_rssi(status->signal_dbm);   // every signal change; LINK_CHANGED below only once per join
+  if (!gLinkRepeat) { if (gLinkSignalPosted) return; gLinkSignalPosted = true; }
   link_event event{}; event.rssi = status->signal_dbm;
   event.noise = static_cast<uint16_t>(-95); event.snr = status->signal_dbm > -95 ? status->signal_dbm + 95 : 0;
   post_event(kEvLinkChanged, &event, sizeof event);
@@ -308,6 +336,39 @@ void note_frame(const uint8_t *e, size_t n, bool out) {
     else at += snprintf(opts + at, sizeof opts - at, " %u", code);
   }
   log(6, "wifi-net: dhcp %s type %u options%s", dir, msg, opts);
+}
+// ---- packet-filter taps ----
+// The stack does not copy frames to the packet filter for a KPI interface; the driver does (bpf.h), or the address configuration's
+// ARP client never sees the router's reply (combo23: ~50 s with no primary interface). bpf_tap_in/out take one global mutex for every
+// frame, listener or not. Called on the radio's receive thread (inside its own locked sections) that wait hung the tablet: combo24 reset
+// silently around the join, and combo24b with t970-wifi-bpf=0 ran fine. So a frame is only copied where it passes, under a spin lock held
+// for a few stores, and a thread call taps the copies, where waiting on that mutex blocks nothing of ours.
+lck_spin_t *gTapLock; thread_call_t gTapCall;
+mbuf_t gTapHead, gTapTail; uint32_t gTapQueued, gTapDropped, gTapped;
+enum : uint32_t { TapBacklog = 128 };
+void tap_drain(thread_call_param_t, thread_call_param_t) {
+  lck_spin_lock(gTapLock);
+  mbuf_t m = gTapHead; gTapHead = gTapTail = nullptr; gTapQueued = 0;
+  lck_spin_unlock(gTapLock);
+  while (m) {
+    mbuf_t next = mbuf_nextpkt(m); mbuf_setnextpkt(m, nullptr);
+    // The receiving interface marks a received copy; a sent one has none.
+    if (mbuf_pkthdr_rcvif(m)) bpf_tap_in(gIf, DLT_EN10MB, m, nullptr, 0); else bpf_tap_out(gIf, DLT_EN10MB, m, nullptr, 0);
+    gTapped++; mbuf_freem(m); m = next;
+  }
+}
+// m starts with the Ethernet header and stays the caller's.
+void tap_queue(mbuf_t m, bool out) {
+  if (!gBpfTap || !gTapCall || !gIf) return;
+  mbuf_t copy = nullptr;
+  if (mbuf_dup(m, MBUF_DONTWAIT, &copy) || !copy) { gTapDropped++; return; }
+  mbuf_pkthdr_setrcvif(copy, out ? nullptr : gIf); mbuf_setnextpkt(copy, nullptr);
+  lck_spin_lock(gTapLock);
+  const bool room = gTapQueued < TapBacklog, kick = room && gTapQueued == 0;
+  if (room) { if (gTapTail) mbuf_setnextpkt(gTapTail, copy); else gTapHead = copy; gTapTail = copy; gTapQueued++; }
+  lck_spin_unlock(gTapLock);
+  if (!room) { gTapDropped++; mbuf_freem(copy); return; }
+  if (kick) thread_call_enter(gTapCall);
 }
 void release_rx_spares() {
   while (gRxSpare) {
@@ -381,6 +442,7 @@ void on_rx_packet(void *context, size_t length, nw_packet_reader reader) {
   }
   if (done != length) { gRxNoBuffer++; mbuf_freem(m); return; }
   mbuf_pkthdr_setlen(m, length); mbuf_pkthdr_setrcvif(m, gIf);
+  tap_queue(m, false);   // a copy, tapped later (packet-filter taps above)
   mbuf_pkthdr_setheader(m, mbuf_data(m)); mbuf_adj(m, 14);   // the stack wants the Ethernet header apart from the payload
   mbuf_setnextpkt(m, nullptr);
   if (gRxTail) mbuf_setnextpkt(gRxTail, m); else gRxHead = m;
@@ -398,6 +460,7 @@ errno_t if_output(ifnet_t, mbuf_t m) {
   size_t length = mbuf_pkthdr_len(m);
   if (length >= 14 && length <= 2000) {
     note_packet(m, length, mbuf_read, true);
+    tap_queue(m, true);   // before the queue takes m (it frees m once the frame is on the air)
     if (nw_wifi_tx_packet(m, length, mbuf_read, mbuf_release)) log(6, "wifi-net: a frame was dropped (queue full)");
     else {ifnet_stat_increment_out(gIf, 1, static_cast<uint32_t>(length), 0); t970_wifi_wake(); return 0;}
   }
@@ -776,6 +839,7 @@ void log_traffic() {
   log(6, "wifi-net: out dns %u tcp %u syn %u syn-ack %u rst %u", gKindsOut.dns, gKindsOut.tcp, gKindsOut.syn, gKindsOut.synack, gKindsOut.rst);
   log(6, "wifi-net: input stalls %u, kicks %u, cleared after a kick %u, longest %u s", gStall.count, gStall.kicks, gStall.cleared, gStall.longest);
   log(6, "wifi-net: rx no buffer %u, chained %u, longest frame %u", gRxNoBuffer, gRxChains, gRxLongest);
+  log(6, "wifi-net: bpf %s tapped %u dropped %u", gBpfTap ? "on" : "off", gTapped, gTapDropped);
   log(6, "wifi-net: rx batches %u largest %u", gRxBatches, gRxLargestBatch);
   nw_buffer_stats buffers{}; nw_wifi_buffer_stats_get(&buffers);
   log(6, "wifi-net: buffers live %llu peak %llu dma-alloc %llu failed %llu",
@@ -886,6 +950,7 @@ extern "C" void t970_wifi_net_start(const uint8_t mac[6]) {
   if (gIf) return;
   memcpy(gMac, mac, 6);
   gGrp = lck_grp_alloc_init("t970-wifi-net", LCK_GRP_ATTR_NULL); gLock = lck_mtx_alloc_init(gGrp, LCK_ATTR_NULL);
+  gTapLock = lck_spin_alloc_init(gGrp, LCK_ATTR_NULL); gTapCall = thread_call_allocate(tap_drain, nullptr);
   struct ifnet_init_eparams p; memset(&p, 0, sizeof p);
   p.ver = IFNET_INIT_CURRENT_VERSION; p.len = sizeof p; p.flags = IFNET_INIT_LEGACY | IFNET_INIT_NX_NOAUTO; p.name = "en"; p.unit = 0; p.family = IFNET_FAMILY_ETHERNET; p.subfamily = IFNET_SUBFAMILY_WIFI; p.type = IFT_ETHER;
   p.output = if_output; p.demux = ether_demux; p.add_proto = ether_add_proto; p.del_proto = ether_del_proto; p.check_multi = ether_check_multi; p.framer = ether_frameout;
@@ -905,6 +970,9 @@ extern "C" void t970_wifi_net_start(const uint8_t mac[6]) {
   nw_wifi_set_events(&gEvents);
   publish_registry("en0");
   // Unattended test credentials are used only with an explicit opt-in.
+  { uint32_t bpf = 1; PE_parse_boot_argn("t970-wifi-bpf", &bpf, sizeof bpf); gBpfTap = bpf != 0; }
+  { uint32_t repeat = 0; PE_parse_boot_argn("t970-wifi-linkrepeat", &repeat, sizeof repeat); gLinkRepeat = repeat != 0; }
+  { uint32_t lqm = 1; PE_parse_boot_argn("t970-wifi-lqm", &lqm, sizeof lqm); gLqm = lqm != 0; }
   { uint32_t aj = 0; PE_parse_boot_argn("t970-wifi-aj", &aj, sizeof aj);
     thread_t t = nullptr; if (aj && kernel_thread_start(autoJoin, nullptr, &t) == KERN_SUCCESS) thread_deallocate(t);
     t = nullptr; if (kernel_thread_start(trafficLog, nullptr, &t) == KERN_SUCCESS) thread_deallocate(t); }

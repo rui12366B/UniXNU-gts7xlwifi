@@ -484,7 +484,7 @@ run(cpufreq_command, cwd=record['directory'])
 # attempt did: the link then failed on every native_legacy_* symbol the hooks define.
 service_objects = []
 # gts7xlwifi adds its STM fts1ba90a touch core (package/T970FtsTouch.cpp), which defines touchProbeStart().
-for service_name in ('BacklightProbe', 'ButtonProbe', 'T970FtsTouch', 'T970WifiProbe', 'T970Battery', 'T970Haptics', 'T970Camera', 'T970CameraService', 'T970Adsp', 'T970Audio', 'T970AudioService', 'T970Sensors'):
+for service_name in ('BacklightProbe', 'ButtonProbe', 'T970FtsTouch', 'T970WifiProbe', 'T970Battery', 'T970Haptics', 'T970Camera', 'T970CameraService', 'T970Adsp', 'T970Audio', 'T970AudioService', 'T970Sensors', 'T970Pen'):
     _service = sorted(ROOT.glob('kits/*/' + service_name + '.cpp'))
     require(_service, service_name + '.cpp missing: no kits/*/' + service_name + '.cpp')
     service_source = _service[0]

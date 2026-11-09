@@ -348,3 +348,97 @@ combo22 (int37), 2026-11-09: the unified log was decoded from the diag export wi
 int38: set 383 accepted, with each key logged once; sets 470/471/473 accepted; SIOCGIFDEVMTU answered (1500, 1280..1500).
 The EROFS and SCPreferences failures say parts of /private/var are not writable for configd and wifid; that is a Data-volume or
 mount matter outside the Wi-Fi driver.
+
+### For the keychain / writable /private/var investigation (combo22 unified log), 2026-11-09
+
+Source: deploy/gts7xlwifi-20261030/logs/combo22/alioth-000000000ef83ff9/diag.bin, unpacked with the shared notes' extract-diag.py.
+The tracev3 files were read with tv3.py, extended to resolve shared-cache formats (format offset + 0x180000000, looked up in Xcode's
+dsc_extractor output of the 21H461 SystemOS cryptex) and uuid-relative ones (configd's IPConfiguration bundle). Counts are over all
+boots in the export.
+- configd / IPConfiguration (10x, once per boot): `failed to create /var/db/dhcpclient/leases, Read-only file system (30)`.
+  EROFS means the path resolves onto a read-only volume: /private/var/db/dhcpclient is not on the writable Data volume, or is missing
+  there.
+- configd / SystemConfiguration: `configopen() failed: 124: unknown error code` and `SCDynamicStoreNotifyValue confignotify(): unknown
+  error code (0x124)`.
+- wifid (15x): `SCPreferencesCommitChanges() Failed!`. At least one is right after `Received signal 15` (shutdown); the others are
+  unexplained. 52x `WiFiManagerHelperInsertWiFiServiceToNetworkSetsIfNotPresent: no changes committed, prefs successfully unlocked`.
+- wifid (169x): `_CFPropertyListCreateBinaryData: CFPropertyListWrite ... NSCocoaErrorDomain Code=3851 "Property list invalid for format:
+  200 (property lists cannot contain objects of type 'WiFiNetwork')"`. wifid tries to save a dictionary that still holds a
+  WiFiNetwork object, so the known-networks plist is never written: 525x `WiFiManagerGetKnownNetworksCache: Fetched 0 known networks
+  from the plist` (/private/var/preferences/com.apple.wifi.known-networks.plist).
+- wifid keychain: 17x `WiFiSecurityCopyPasswordWithTimeout ... Error result -25300` and 17x `WiFiSecurityCopyNonSyncablePasswordWithTimeout
+  ... -25300` (errSecItemNotFound: the password was never stored), 7x `WiFiSecurityRemovePasswordFromPasswordBackup ... -25300`. The BT
+  session sees errSecNotAvailable (-25291) from the keychain.
+- wifid lock state, early in each boot: 38x `WiFiManagerSetPowerExt: device hasn't been unlocked since boot. Overriding power state to
+  OFF.`, 76x `WiFiManagerGetKnownNetworksCache: device not yet unlocked. Not fetching network list.`, `unlockedSinceBoot FALSE`, which
+  later turns TRUE. Keybag and first-unlock state (AppleKeyStore) matter here.
+- wifid: `__WiFiManagerLoadDeviceSettings: failed to open file:///private/var/Managed%20Preferences/mobile/com.apple.wifid.configure.plist`
+  (38x; normally absent, probably harmless).
+- IPMonitor never chose an IPv4 primary ("network changed" lines only for DNS/Proxy; wifid: `{IP-} IPv4 Primary interface is (null)`),
+  although IPConfiguration published DHCP `{ IPv4, DNS, DHCP }`. configd set `SetInterfaceRank(en0) = Never (3)` at start; wifid set
+  `Default (0)` 157x.
+Useful export additions: /private/var/preferences/SystemConfiguration/preferences.plist, /private/var/preferences/com.apple.wifi.known-networks.plist,
+and `mount` output / the vnode's mount for /private/var/db and /private/var/preferences.
+
+### combo23 (int38 + keychain AKS + union-ro-create): no primary / no DNS for ~50 s after the address is set, 2026-11-09
+
+Source: combo23 diag.bin (8 boots in Persist) plus the run's slots.txt. Decoded as for combo22; also resolves shared-cache formats with a
+large offset (flag 0x20: offset | u16 << 31), which is where configd's own SystemConfiguration lines were.
+- Fixed by the earlier patches: no `/var/db/dhcpclient/leases` EROFS after boot `aa`; known networks load (`Fetched 1 known networks`);
+  the password survives a reboot. Still present: `CFPropertyListWrite ... 3851 ... 'WiFiNetwork'` (wifid in-memory encode, not a file
+  write), occasional `SCPreferencesCommitChanges() Failed!`, `configopen() failed: 124`.
+- The network is now configured with a manual IPv4 address (Settings, in an earlier boot: IPConfiguration `DHCP en0: RELEASE`, then
+  `MANUAL en0: setting <addr>` right after Preferences read the known network; wifid `configMethod Manual`). The router and DNS server
+  given there answer (ARP, DNS and TCP replies in the driver log), so this is a user setting, not a fault.
+- Correction to combo22: IPMonitor does elect en0 (symptomsd `_primaryKeyChange new (..., en0)`, `def routes count: 1`, `en0 has DNS
+  server`) but only once IPConfiguration publishes, and it publishes ~48 s after setting the address, in DHCP and in MANUAL mode alike
+  (DHCP boot `a5` and manual boot `a8`: 48.1 s between `setting <addr>` and the publish). The wifid
+  `IPv4 Primary interface is (null)` lines are all from before that.
+- Cause: before publishing, IPConfiguration resolves the router with its own ARP client, which reads replies through BPF. XNU does not
+  copy KPI-interface traffic to BPF (bpf.h: the driver calls bpf_tap_in/bpf_tap_out), and T970WifiNet never did. In combo23 the router's
+  ARP reply arrived 5 ms after the request (`arp out ... asks <router>` / `arp in op 2 <router>`), yet the driver counted about one ARP
+  request per second for ~60 s (out arp 16 -> 67) until IPConfiguration gave up and published. Only then: first DNS query at 162 s,
+  syn/syn-ack to 443 right after. A Safari try before that gets mDNSResponder `GenerateNegativeResponse` (no resolver: no primary).
+- Fix (package/T970WifiNet.cpp): bpf_tap_in on every received frame (full Ethernet frame, before the header is split off) and
+  bpf_tap_out on every sent one. Expect `publish success` within a second or two of the address, then the IPv4 primary.
+- Status bar icon, still open: SpringBoard's SBWiFiManager logs `WiFiDeviceClientCopyCurrentNetwork:` (empty) and `_isPrimaryInterface: 0`
+  and gets no link callback after the join, also in the boots where en0 did become primary; STWifiStatusDomain stays `wifiActive = NO`.
+  wifid's usage session reports `Rejected _linkUp 0 _didBecomePrimary 0`. The driver re-posts LINK_CHANGED (event 4) with every status
+  update (`on_link_update`, every 7-14 s), and wifid treats each as a new `link up`. The Persist log of each boot ends ~20 s after the
+  join, so the period after the primary is not in the export; a later export is needed to see SpringBoard after the primary.
+
+### combo24 / combo24b: the BPF taps hung the tablet, 2026-11-09
+
+combo24 (taps called inline) reset silently twice: no panic, log stops just before the join. combo24b, the same build with
+`t970-wifi-bpf=0`, ran fine. `bpf_tap_in/out` take the global `bpf_mlock` for every frame, even with no listener. On the radio's receive
+thread, inside the Linux code's own locked sections, that wait hangs the system until the watchdog fires. The taps are now deferred: the
+receive and send paths `mbuf_dup` the frame under a spin lock (backlog of 128, then dropped) and a `thread_call` taps the copies.
+`t970-wifi-bpf=0` still turns them off. The status dump logs `bpf on|off tapped N dropped N`.
+
+combo24b export (taps off, log to 99 s): the join was manual from Settings at 88.4 s. Auto-join reported `Auto-join is disabled`,
+and IPv4 was still MANUAL. IPv6 was published at 88.4 s. IPv4 was not published before the export (taps off, so the old ~50 s ARP delay).
+After the join wifid logged `link up` six times in 6 s. Its usage monitor counted each one as a roam to the same BSSID ("active session is
+being RE-started"). SpringBoard got its link callback for the link going down at 87.84 s but none after the link came up, and every
+`WiFiDeviceClientCopyCurrentNetwork` returned empty (`_isPrimaryInterface: 0`). The repeats come from `on_link_update`, which posted
+LINK_CHANGED for each signal change of 3 dB or more. It now posts at most one per join, and only when the join's own event had no
+signal. `t970-wifi-linkrepeat=1` restores the old behaviour. Whether the repeats are what keep the status bar icon hidden is not yet
+confirmed.
+
+### combo25 (deferred taps + one LINK_CHANGED per join), 2026-11-09
+
+- **Taps:** they work. The link came up at 81.08 s and IPv4 (MANUAL) was published at 82.38 s, against ~50 s before. symptomsd made en0
+  the primary at 82.64 s, and the driver counted ~290k frames in.
+- **Status bar icon:** shows. At 82.66 s SpringBoard received the current network (`_primaryInterfaceChanged: marking current network as
+  primary`), with `STWifiStatusDomainData wifiActive = YES`.
+- **Signal bars:** stay at 0. `signalStrengthBars = 0`. SpringBoard's only `signal strength bars changed to 0` came at 80.45 s from
+  the extended link callback for the failed first association. After the link came up at 81.05 s SpringBoard got only CoreWiFi's
+  `CWFEventTypeLinkChanged`: no `_WiFiDeviceClientExtendedLinkCallback`, no `_linkDidChange`, so it never recomputed the bars. wifid
+  did hold the signal: `Initializing lqm value: rawRssi -38, scaledRssi 0.94`.
+  - wifid subscribes to `APPLE80211_M_RSSI_CHANGED`. That is event 39 if IO80211's event-name table is indexed by code; entries 1–10 match
+    the codes the driver already uses. SpringBoard's `_updateSignalStrengthFromRawRSSI:andScaledRSSI:` reads `RSSI` / `SCALED_RSSI`. The
+    driver never posts RSSI_CHANGED, and the event's payload layout is not known yet.
+- **Safari:** loads nothing because AMFI kills its web content process at launch (kernel msgbuf, pids 362 and 363):
+  `Launch Constraint Violation (enforcing) ... c[1]p[1]m[1]e[4] (Constraint not matched)` for
+  `/System/Library/ExtensionKit/Extensions/WebContentExtension.appex/com.apple.WebKit.WebContent`. News uses NSURLSession in its own
+  process, so it works. The kernel already has the global off switch `sheng-no-lc=1` (zzyc-owner-skip-launch-constraints.patch). A
+  targeted fix would exempt this one path in `mac_proc_check_launch_constraints`.

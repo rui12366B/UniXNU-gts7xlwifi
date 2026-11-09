@@ -121,7 +121,9 @@ constexpr uint64_t kDefaultPa = 0x8de00000;   // pil_cvp_region
 constexpr uint32_t kBufferBytes = 512 * 1024;
 constexpr uint16_t kStream = 0x1801, kSession = 1, kPort = 0x9000, kGroup = 0x9100;
 constexpr uint32_t kRate = 48000, kChannels = 4, kBits = 16, kSlotBits = 32, kSclk = 6144000, kClkPriTdmIbit = 0x200;
-constexpr uint32_t kPeriodFrames = 960, kPeriodBytes = kPeriodFrames * kChannels * 2, kSlots = kBufferBytes / kPeriodBytes, kInFlight = 4;
+// The buffer's first half is playback's, the second the capture's, each mapped to its own ASM session.
+constexpr uint32_t kPlayBytes = kBufferBytes / 2;
+constexpr uint32_t kPeriodFrames = 960, kPeriodBytes = kPeriodFrames * kChannels * 2, kSlots = kPlayBytes / kPeriodBytes, kInFlight = 4;
 constexpr unsigned kSda = 60, kScl = 61, kReset = 69, kHalf = 5;
 constexpr unsigned kTdmPins[4] = {138, 139, 140, 141};
 constexpr uint32_t kRing = 16, kMessage = 128;
@@ -605,6 +607,7 @@ Window gBuf;
 uint32_t gDone, gErrors, gInFlight;
 bool gServing;                       // device mode: write answers belong to the stream (streamDone), not the tone
 void streamDone(const AprAnswer &a);
+void micDone(const AprAnswer &a);   // capture (below)
 void handleWriteDone(const AprAnswer &a) {
     if (gServing) {streamDone(a); return;}
     gDone++; if (gInFlight) gInFlight--;
@@ -622,6 +625,7 @@ int command(unsigned index, const uint8_t *p, uint32_t n, uint32_t opcode, int w
         int kind = 0;
         while (nextAnswer(a, kind, end)) {
             if (kind == AprWriteDone) {handleWriteDone(a); continue;}
+            if (kind == AprReadDone) {micDone(a); continue;}
             if (kind == AprBasic && a.result_opcode == opcode) {status = (int)a.status; if (out) *out = a; break;}
             if (want != AprBasic && kind == want) {status = kind == AprAdmOpened ? (int)a.status : 0; if (out) *out = a; break;}
             t970_audio_stats[15] = t970_audio_stats[15] + 1;
@@ -727,7 +731,7 @@ bool asmOpen() {
     gAsmOpen = true;
     if (command(9, p, apr_adm_map(p, 0, kSession, gCopp), ADM_CMD_MATRIX_MAP_V5)) return fail(8, t970_audio_cmd[9]);
     if (command(11, p, apr_asm_media_format(p, kSession, kRate, kChannels, kBits), ASM_DATA_CMD_MEDIA_FMT_V2)) return fail(8, t970_audio_cmd[11]);
-    if (command(12, p, apr_asm_map(p, kSession, gDsp, kBufferBytes), ASM_CMD_MEM_MAP, AprMapped, &a) || a.opcode != ASM_CMDRSP_MEM_MAP)
+    if (command(12, p, apr_asm_map(p, kSession, gDsp, kPlayBytes), ASM_CMD_MEM_MAP, AprMapped, &a) || a.opcode != ASM_CMDRSP_MEM_MAP)
         return fail(8, t970_audio_cmd[12] ? t970_audio_cmd[12] : -62);
     gHandle = a.value;
     t970_audio_stats[11] = (int32_t)gHandle;
@@ -811,7 +815,7 @@ void closeSession(const AmpCfg &cfg) {
 void teardown(const AmpCfg &cfg) {closeSession(cfg); unrouteStream();}
 
 // ---- device mode (bit 32): the shared ring and the output stream ----
-constexpr uint32_t kOutFrames = T970_AUDIO_PERIOD_FRAMES, kOutBytes = kOutFrames * kChannels * 2, kOutSlots = kBufferBytes / kOutBytes;
+constexpr uint32_t kOutFrames = T970_AUDIO_PERIOD_FRAMES, kOutBytes = kOutFrames * kChannels * 2, kOutSlots = kPlayBytes / kOutBytes;
 constexpr uint32_t kRingFrames = T970_AUDIO_RING_FRAMES, kOutCh = T970_AUDIO_OUT_CHANNELS, kLeadFrames = 30 * kOutFrames;
 constexpr uint32_t kStreamInFlight = 4, kKeepMs = 5000;
 // The DSP answers a buffer once it has copied it into its own queue, and that queue fills over the first hundreds of ms of a run: a
@@ -820,7 +824,8 @@ constexpr uint32_t kStreamInFlight = 4, kKeepMs = 5000;
 // after 1 s and corrected only past 20 periods (the plug-in writes about 600 ms ahead, so a 200 ms drift still finds written frames).
 constexpr int64_t kDriftLimit = 20 * kOutFrames;
 constexpr uint64_t kSettlePeriods = 100;
-IOBufferMemoryDescriptor *gControlMem, *gRingMem;
+IOBufferMemoryDescriptor *gControlMem, *gRingMem, *gRingInMem;
+int16_t *gRingIn;   // the capture ring (on by default; t970-audio bit 8388608 turns it off), mono
 T970AudioControl *gCtl;
 int16_t *gRingOut;
 volatile uint32_t gWant, gPublished;
@@ -835,6 +840,12 @@ bool setupShared() {
     gControlMem = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task, shared, 4096, 4096);
     gRingMem = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task, shared, kRingFrames * kOutCh * 2, 4096);
     if (!gControlMem || !gRingMem) return false;
+    if (!(gCfg.mode & 8388608)) {   // capture (default on since combo23, Voice Memos worked; bit 8388608 turns it off): the mono input ring
+        gRingInMem = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task, shared, kRingFrames * 2, 4096);
+        if (!gRingInMem) return false;
+        gRingIn = static_cast<int16_t *>(gRingInMem->getBytesNoCopy());
+        memset(gRingIn, 0, kRingFrames * 2);
+    }
     gCtl = static_cast<T970AudioControl *>(gControlMem->getBytesNoCopy());
     gRingOut = static_cast<int16_t *>(gRingMem->getBytesNoCopy());
     memset(gCtl, 0, 4096);
@@ -842,7 +853,7 @@ bool setupShared() {
     mach_timebase_info_data_t tb;
     clock_timebase_info(&tb);
     T970AudioControl *c = gCtl;
-    c->rate = kRate; c->out_channels = kOutCh; c->in_channels = T970_AUDIO_IN_CHANNELS;
+    c->rate = kRate; c->out_channels = kOutCh; c->in_channels = gRingIn ? T970_AUDIO_IN_CHANNELS : 0;
     c->period_frames = kOutFrames; c->ring_frames = kRingFrames; c->lead_frames = kLeadFrames;
     // 128-bit: with the 19.2 MHz timer 1e9 * denom << 32 overflows 64 bits (sheng i535).
     c->ticks_per_frame_q32 = (uint64_t)(((__uint128_t)1000000000ULL * tb.denom << 32) / ((uint64_t)kRate * tb.numer));
@@ -1106,7 +1117,7 @@ bool submit(uint64_t n) {
     }
     if (!send(p, apr_asm_write(p, kSession, (uint32_t)n, gDsp + slot * kOutBytes, gHandle, kOutBytes, (uint32_t)n))) return false;
     t970_audio_stream[3] = t970_audio_stream[3] + 1;
-    gCtl->in_written = (n + 1) * kOutFrames;   // the plug-in counts writes that start before this (t970_audio_timing[3])
+    gCtl->out_taken = (n + 1) * kOutFrames;   // the plug-in counts writes that start before this (t970_audio_timing[3])
     gStreamInFlight++;
     return true;
 }
@@ -1145,7 +1156,7 @@ void startOutput() {
     // the last run are cleared when it stops (stopOutput).
     memset(gHpf, 0, sizeof gHpf);
     gNext = gDoneP = gFirst = (framesNow() + kOutFrames - 1) / kOutFrames;
-    gCtl->in_written = gNext * kOutFrames;
+    gCtl->out_taken = gNext * kOutFrames;
     t970_audio_timing[4] = t970_audio_timing[4] + 1;
     gCtl->out_frames = 0;
     gStreamInFlight = 0;
@@ -1168,6 +1179,206 @@ void stopOutput() {
     __atomic_and_fetch(&gCtl->state, ~T970AudioOutputRunning, __ATOMIC_ACQ_REL);
     __atomic_and_fetch(&gCtl->test_flags, ~(1u << 8), __ATOMIC_ACQ_REL);
     t970_audio_stream[1] = t970_audio_stream[1] + 1;
+}
+// ---- capture (on by default; t970-audio bit 8388608 turns it off): the built-in digital microphones into the plug-in's input stream ----
+// Live FDT: DMIC0..3 on the LPASS codec (bolero) TX macro, clock/data on LPI GPIO 6/7 (DMIC0/1) and 8/9 (DMIC2/3); their clocks
+// are generated in the VA macro's top CSR. Sequence from downstream techpack/audio bolero (tx-macro.c tx_macro_mclk_enable,
+// tx_macro_put_dec_enum, tx_macro_enable_dec, bolero-cdc.c bolero_dmic_clk_enable, bolero-clk-rsc.c fs_gen): the TX core and NPL
+// clocks (AFE clock ids 0x30c/0x30d, 19.2 MHz) and the macro's 9.6 MHz MCLK, the board's fs-gen sequence (VA MCLK, FS counter,
+// TOP_CFG0), the DMIC mux and clock (2.4 MHz: MCLK / 4), decimator 0 at 48 kHz with its HPF settle and unmute, then the codec DMA
+// port TX_CODEC_DMA_TX_3 (0xB037, active decimator mask 1), an ADM TX COPP and ASM session 2 reading 10 ms periods into the second
+// half of the shared buffer; each period goes to the input ring at the timeline position the plug-in reads.
+// t970-audio-mic=N: the DMIC (0..3), default 3: Android's camcorder recording (live mixer dump 2026-11-09) takes DEC0 from DMIC3
+// and DEC1 from DMIC1 on TX_CODEC_DMA_TX_3, decimator volume 84 (0 dB), ADC default mode; DMIC3 is the first channel. Its supply
+// is the DT's "MIC BIAS External1", the TX macro's sub-mic-bias PM8150A L5 ("ldoc5", 1.8 V): voted on (HPM) for DMIC3 while capturing.
+// t970-audio-micgain=dB (decimator volume, -84..40, default 0).
+// t970_audio_mic: [0] stage (negative: failed there) [1] error [2] starts [3] stops [4] reads sent [5] reads done [6] read errors
+// [7] frames [8] peak [9] resyncs [10] TX0_PATH_CTL [11] VA DMIC CTL [12] TX core id / reads of the macro, [13] AFE port start,
+// [14] ADM COPP, [15] capture position minus now (frames) at the last period.
+// [16] the mic supply vote's result (ldoc5, DMIC3 only; -100 no RPMh writer, -1 not voted).
+extern "C" {volatile int32_t t970_audio_mic[20];}
+extern "C" int t970_rpmh_write(const char *name, uint32_t word, uint32_t value) __attribute__((weak_import));
+// The plug-in's input reads: reads, reads past the captured end (silence), least and most captured end minus the read's end (frames).
+extern "C" {volatile int32_t t970_audio_micp[4];}
+constexpr uint64_t kTxMacro = 0x3220000, kVaMacro = 0x3370000, kLpiGpio6 = 0x33c6000;
+constexpr uint16_t kMicSession = 2, kMicPort = AFE_PORT_ID_TX_CODEC_DMA_TX_3;
+constexpr uint32_t kMicFrames = T970_AUDIO_PERIOD_FRAMES, kMicBytes = kMicFrames * 2, kMicSlots = 64, kMicInFlight = 4;
+constexpr uint32_t kTxPathCtl = 0x400, kTxPathCfg0 = 0x404, kTxVolCtl = 0x40c, kTxPathSec2 = 0x418, kTxPathSec7 = 0x42c;
+Window gTxW, gVaW, gLpiW;
+bool gMicRunning, gMicVoted;
+uint16_t gMicCopp = 0xffff;
+uint32_t gMicHandle, gMicInFlight, gMicSeq, gMicDmic;
+int32_t gMicGain;
+uint64_t gMicPos;
+void micFail(int stage, int err) {t970_audio_mic[0] = -stage; t970_audio_mic[1] = err;}
+void rUpd(Window &w, uint32_t off, uint32_t mask, uint32_t v) {w.va[off / 4] = (w.va[off / 4] & ~mask) | (v & mask); barrier();}
+uint32_t rRd(Window &w, uint32_t off) {return w.va[off / 4];}
+bool micClocks(bool on) {
+    uint8_t p[APR_MAX_PACKET];
+    int rc = command(99, p, apr_afe_clock(p, 2048, 0, 0x30c, on ? 19200000 : 0, 1), AFE_SVC_CMD_SET_PARAM);
+    const int rc2 = command(99, p, apr_afe_clock(p, 2049, 0, 0x30d, on ? 19200000 : 0, 1), AFE_SVC_CMD_SET_PARAM);
+    if (on && (rc || rc2)) {micFail(2, rc ? rc : rc2); return false;}
+    return true;
+}
+// LPI pin n (6..9) as the DMIC function: function 1, 2 mA, data pins pulled down.
+void micPin(unsigned n, bool data) {
+    volatile uint32_t *cfg = gLpiW.va + (n - 6) * (0x1000 / 4);
+    cfg[0] = (data ? 1u : 0u) | 1u << 2;
+    barrier();
+}
+bool startCapture() {
+    if (gMicRunning) return true;
+    uint8_t p[APR_MAX_PACKET];
+    AprAnswer a;
+    t970_audio_mic[2] = t970_audio_mic[2] + 1;
+    // 1: the LPASS core and audio votes the codec registers need (refused votes are noted, not fatal: the playback path votes too)
+    if (!gMicVoted) {
+        command(99, p, apr_afe_hw_vote(p, AFE_HW_BLOCK_MACRO, AFE_HW_BLOCK_MACRO, "MIC_MACRO"), AFE_CMD_HW_VOTE, AprVote, &a);
+        command(99, p, apr_afe_hw_vote(p, AFE_HW_BLOCK_DCODEC, AFE_HW_BLOCK_DCODEC, "MIC_DCODEC"), AFE_CMD_HW_VOTE, AprVote, &a);
+        gMicVoted = true;
+    }
+    t970_audio_mic[0] = 1;
+    t970_audio_mic[16] = -1;
+    if (gMicDmic == 3) {
+        int r = -100;
+        if (&t970_rpmh_write) {
+            r = t970_rpmh_write("ldoc5", 0, 1800);
+            if (!r) r = t970_rpmh_write("ldoc5", 8, 7);
+            if (!r) r = t970_rpmh_write("ldoc5", 4, 1);
+        }
+        t970_audio_mic[16] = r;   // not fatal: the rail may be on already
+        IODelay(2000);
+    }
+    // 2: the TX core / NPL clocks; no codec register is touched before they run (the macro's bus would not answer)
+    if (!micClocks(true)) return false;
+    t970_audio_mic[0] = 2;
+    if (!gTxW.va && (!mapWindow(gTxW, kTxMacro, 0x1000) || !mapWindow(gVaW, kVaMacro, 0x1000) || !mapWindow(gLpiW, kLpiGpio6, 0x4000))) {
+        micFail(3, -12); micClocks(false); return false;
+    }
+    // 3: fs-gen sequence (VA MCLK, VA FS counter, VA TOP_CFG0 bit 1), the TX MCLK at 9.6 MHz, the decimator's SEC7 default
+    rUpd(gVaW, 0x00, 1, 1); rUpd(gVaW, 0x04, 1, 1); rUpd(gVaW, 0x80, 2, 2);
+    rUpd(gTxW, 0x90, 1, 1); rUpd(gTxW, 0x00, 1, 1); rUpd(gTxW, 0x04, 1, 1);
+    rUpd(gTxW, kTxPathSec7, 0x3f, 0x0a);
+    t970_audio_mic[12] = (int32_t)rRd(gVaW, 0xc0);
+    t970_audio_mic[0] = 3;
+    // 4: pins, DMIC mux (ADC mux 0 CFG0 bits 7:4 = DMIC + 1, CFG1 = MSM DMIC), path CFG0 DMIC select, DMIC clock MCLK/4 on
+    const uint32_t d = gMicDmic;
+    micPin(6 + (d / 2) * 2, false); micPin(7 + (d / 2) * 2, true);
+    rUpd(gTxW, 0x100, 0xf0, (d + 1) << 4);
+    rUpd(gTxW, 0x104, 0x03, 0);
+    rUpd(gTxW, kTxPathCfg0, 0x86, 0x80);
+    rUpd(gVaW, 0x94, 0x80, 0);
+    rUpd(gVaW, 0x84 + 4 * (d / 2), 0x0e, 2u << 1);
+    rUpd(gVaW, 0x84 + 4 * (d / 2), 0x01, 1);
+    t970_audio_mic[11] = (int32_t)rRd(gVaW, 0x84 + 4 * (d / 2));
+    // 5: decimator 0: 48 kHz, muted, enabled, HPF gate released, settle, gain
+    rUpd(gTxW, kTxPathCtl, 0x0f, 4);
+    rUpd(gTxW, kTxPathCtl, 0x10, 0x10);
+    rUpd(gTxW, kTxPathCtl, 0x20, 0x20);
+    rUpd(gTxW, kTxPathSec2, 0x01, 0);
+    IODelay(1000);
+    rUpd(gTxW, kTxPathSec2, 0x03, 0x02); rUpd(gTxW, kTxPathSec2, 0x03, 0x00); rUpd(gTxW, kTxPathSec2, 0x03, 0x01);
+    IODelay(6000);
+    gTxW.va[kTxVolCtl / 4] = (uint32_t)(uint8_t)(int8_t)gMicGain;
+    barrier();
+    t970_audio_mic[10] = (int32_t)rRd(gTxW, kTxPathCtl);
+    t970_audio_mic[0] = 5;
+    // 6: the codec DMA TX port
+    const int cfg = command(99, p, apr_afe_cdc_dma(p, 2050, kMicPort, kRate, 16, 1, 1), AFE_PORT_CMD_SET_PARAM_V2);
+    const int st = cfg ? cfg : command(99, p, apr_afe_port(p, 2051, AFE_PORT_CMD_DEVICE_START, kMicPort), AFE_PORT_CMD_DEVICE_START);
+    t970_audio_mic[13] = cfg ? 0x100 | (cfg & 0xff) : st;
+    if (st) {micFail(6, st); return false;}
+    t970_audio_mic[0] = 6;
+    // 7: ADM TX COPP, ASM read session, matrix, PCM encoder, memory, run
+    if (command(99, p, apr_adm_open_path(p, (uint32_t)kMicPort << 16 | 2, kMicPort, 2, kRate, 1, 16), ADM_CMD_DEVICE_OPEN_V5, AprAdmOpened, &a) ||
+        a.opcode != ADM_CMDRSP_DEVICE_OPEN_V5 || a.value == 0xff) {micFail(7, -62); return false;}
+    gMicCopp = uint16_t(a.value);
+    t970_audio_mic[14] = gMicCopp;
+    int rc = command(99, p, apr_asm_open_read(p, kMicSession, 16), ASM_STREAM_CMD_OPEN_READ_V3);
+    if (!rc) rc = command(99, p, apr_adm_map_matrix(p, 2052, ADM_MATRIX_ID_AUDIO_TX, kMicSession, gMicCopp), ADM_CMD_MATRIX_MAP_V5);
+    if (!rc) rc = command(99, p, apr_asm_enc_pcm(p, kMicSession, kRate, 1, 16), ASM_STREAM_CMD_SET_ENCDEC_PARAM);
+    if (rc) {micFail(8, rc); return false;}
+    if (command(99, p, apr_asm_map(p, kMicSession, gDsp + kPlayBytes, kPlayBytes), ASM_CMD_MEM_MAP, AprMapped, &a) || a.opcode != ASM_CMDRSP_MEM_MAP) {
+        micFail(9, -62); return false;
+    }
+    gMicHandle = a.value;
+    if ((rc = command(99, p, apr_asm_session(p, kMicSession, ASM_SESSION_CMD_RUN_V2), ASM_SESSION_CMD_RUN_V2))) {micFail(10, rc); return false;}
+    gMicRunning = true;
+    gMicInFlight = 0;
+    gMicPos = framesNow();
+    gCtl->in_written = gMicPos;
+    for (unsigned i = 0; i < kMicInFlight; ++i) {
+        const uint32_t slot = gMicSeq % kMicSlots;
+        if (!send(p, apr_asm_read(p, kMicSession, gMicSeq, gDsp + kPlayBytes + slot * kMicBytes, gMicHandle, kMicBytes, gMicSeq))) break;
+        gMicSeq++; gMicInFlight++;
+        t970_audio_mic[4] = t970_audio_mic[4] + 1;
+    }
+    __atomic_or_fetch(&gCtl->state, T970AudioInputRunning, __ATOMIC_ACQ_REL);
+    IOSleep(100);                                     // the DMIC and HPF settle with the decimator muted, then unmute
+    rUpd(gTxW, kTxPathCtl, 0x10, 0);
+    t970_audio_mic[10] = (int32_t)rRd(gTxW, kTxPathCtl);
+    t970_audio_mic[0] = 11;
+    return true;
+}
+void stopCapture() {
+    uint8_t p[APR_MAX_PACKET];
+    const bool wasRunning = gMicRunning;
+    gMicRunning = false;
+    __atomic_and_fetch(&gCtl->state, ~T970AudioInputRunning, __ATOMIC_ACQ_REL);
+    if (wasRunning) {
+        command(99, p, apr_asm_session(p, kMicSession, ASM_SESSION_CMD_PAUSE), ASM_SESSION_CMD_PAUSE);
+        command(99, p, apr_asm_session(p, kMicSession, ASM_STREAM_CMD_CLOSE), ASM_STREAM_CMD_CLOSE);
+    }
+    if (gMicHandle) command(99, p, apr_asm_unmap(p, kMicSession, gMicHandle), ASM_CMD_MEM_UNMAP);
+    if (gMicCopp != 0xffff) command(99, p, apr_adm_close(p, (uint32_t)kMicPort << 16 | 2, kMicPort, gMicCopp), ADM_CMD_DEVICE_CLOSE_V5);
+    if (t970_audio_mic[0] >= 6 || t970_audio_mic[0] <= -7)
+        command(99, p, apr_afe_port(p, 2053, AFE_PORT_CMD_DEVICE_STOP, kMicPort), AFE_PORT_CMD_DEVICE_STOP);
+    if (gTxW.va && (t970_audio_mic[0] >= 3 || t970_audio_mic[0] <= -4)) {
+        rUpd(gTxW, kTxPathCtl, 0x10, 0x10);
+        rUpd(gTxW, kTxPathCtl, 0x20, 0);
+        rUpd(gTxW, kTxPathCfg0, 0x06, 0);
+        rUpd(gVaW, 0x84 + 4 * (gMicDmic / 2), 0x01, 0);
+        rUpd(gTxW, 0x04, 1, 0); rUpd(gTxW, 0x00, 1, 0);
+    }
+    if (t970_audio_mic[0] >= 2 || t970_audio_mic[0] <= -3) micClocks(false);
+    if (t970_audio_mic[16] == 0 && &t970_rpmh_write) t970_rpmh_write("ldoc5", 4, 0);
+    gMicHandle = 0; gMicCopp = 0xffff; gMicInFlight = 0;
+    t970_audio_mic[3] = t970_audio_mic[3] + 1;
+}
+// A captured period: its frames go to the input ring at the capture position (the timeline frame the first one was taken at); the
+// position follows the DSP and is set back to now when the two drift more than 200 ms apart.
+void micDone(const AprAnswer &a) {
+    uint8_t p[APR_MAX_PACKET];
+    if (gMicInFlight) gMicInFlight--;
+    t970_audio_mic[5] = t970_audio_mic[5] + 1;
+    if (a.status) t970_audio_mic[6] = t970_audio_mic[6] + 1;
+    if (!gMicRunning) return;
+    const uint64_t base = gDsp + kPlayBytes, at = a.address >= base ? a.address - base : 0;
+    const uint32_t bytes = a.words[0], offset = a.words[1];
+    if (!a.status && at + offset + bytes <= kPlayBytes && bytes <= kMicBytes) {
+        const volatile int16_t *src = reinterpret_cast<volatile int16_t *>(reinterpret_cast<volatile uint8_t *>(gBuf.va) + kPlayBytes + at + offset);
+        const uint32_t frames = bytes / 2;
+        const int64_t now = (int64_t)framesNow(), drift = (int64_t)gMicPos - now;
+        if (drift > 9600 || drift < -9600) {gMicPos = (uint64_t)(now - (int64_t)kMicFrames); t970_audio_mic[9] = t970_audio_mic[9] + 1;}
+        int32_t peak = t970_audio_mic[8];
+        for (uint32_t f = 0; f < frames; ++f) {
+            const int16_t v = src[f];
+            gRingIn[(gMicPos + f) % kRingFrames] = v;
+            const int32_t m = v < 0 ? -(int32_t)v : v;
+            if (m > peak) peak = m;
+        }
+        t970_audio_mic[8] = peak;
+        gMicPos += frames;
+        __atomic_store_n(&gCtl->in_written, gMicPos, __ATOMIC_RELEASE);
+        t970_audio_mic[7] = t970_audio_mic[7] + (int32_t)frames;
+        t970_audio_mic[15] = (int32_t)((int64_t)gMicPos - (int64_t)framesNow());
+    }
+    while (gMicInFlight < kMicInFlight) {
+        const uint32_t slot = gMicSeq % kMicSlots;
+        if (!send(p, apr_asm_read(p, kMicSession, gMicSeq, base + slot * kMicBytes, gMicHandle, kMicBytes, gMicSeq))) break;
+        gMicSeq++; gMicInFlight++;
+        t970_audio_mic[4] = t970_audio_mic[4] + 1;
+    }
 }
 // The output volume: the plug-in's setting (milli-dB) as the amplifiers' AMP_VOL_PCM, 11-bit two's complement in 0.125 dB steps
 // (+12..-102 dB, 0x400 mutes), applied with their 0.5 ms soft ramp; the samples stay at full 16-bit resolution (int15n: scaling them
@@ -1285,6 +1496,8 @@ void noteHal() {
     h[11] = (uint32_t)d->io_pri;
     t970_audio_timing[3] = (int32_t)d->in_misses;
     t970_audio_cap[6] = (uint32_t)d->ahead_min; t970_audio_cap[7] = (uint32_t)d->ahead_max;
+    t970_audio_micp[0] = (int32_t)d->mic_reads; t970_audio_micp[1] = (int32_t)d->mic_short;
+    t970_audio_micp[2] = d->mic_behind_min; t970_audio_micp[3] = d->mic_behind_max;
     volatile int32_t *v = t970_audio_vol;
     v[0] = d->vol_kind; v[1] = d->vol_raw_milli; v[2] = d->vol_element; v[3] = (int32_t)d->gain_now; v[4] = (int32_t)d->gain_min;
     v[5] = (int32_t)d->gain_max; v[6] = (int32_t)d->vol_history_count;
@@ -1302,6 +1515,13 @@ bool publishService() {
 }
 void serveDevice(const AmpCfg &cfg) {
     gCfg = cfg;
+    {
+        unsigned dmic = 3; int gainDb = 0;
+        PE_parse_boot_argn("t970-audio-mic", &dmic, sizeof dmic);
+        PE_parse_boot_argn("t970-audio-micgain", &gainDb, sizeof gainDb);
+        gMicDmic = dmic & 3;
+        gMicGain = gainDb < -84 ? -84 : gainDb > 40 ? 40 : gainDb;
+    }
     if (!setupShared()) {fail(20, -12); return;}
     gServing = true;
     __atomic_store_n(&gPublished, 1u, __ATOMIC_RELEASE);
@@ -1333,10 +1553,20 @@ void serveDevice(const AmpCfg &cfg) {
         if (want & T970AudioOutputRunning) {gStopAsked = 0; if (!gRunning) startOutput();}
         else if (gRunning && !gStopAsked) gStopAsked = nowMs();
         else if (gRunning && nowMs() - gStopAsked >= kKeepMs) {gStopAsked = 0; stopOutput();}
+        // Capture follows the plug-in's input requests at once (no amplifiers to keep warm); a failed start is retried only on the
+        // next request.
+        if (gRingIn) {
+            static uint32_t lastWant;
+            const uint32_t wantIn = want & T970AudioInputRunning;
+            if (wantIn && !lastWant && !gMicRunning) {if (!startCapture()) stopCapture();}
+            else if (!wantIn && lastWant) stopCapture();
+            lastWant = wantIn;
+        }
         AprAnswer a;
         int kind = 0;
         if (nextAnswer(a, kind, nowMs() + (gRunning ? 100 : 1000))) {
             if (kind == AprWriteDone) streamDone(a);
+            else if (kind == AprReadDone) micDone(a);
             else t970_audio_stats[15] = t970_audio_stats[15] + 1;
         }
         applyVolume();
@@ -1436,7 +1666,8 @@ extern "C" void t970_audio_start(void) {
 
 extern "C" IOBufferMemoryDescriptor *t970_audio_memory(uint32_t type) {
     if (!__atomic_load_n(&gPublished, __ATOMIC_ACQUIRE)) return nullptr;
-    IOBufferMemoryDescriptor *m = type == T970AudioMemoryControl ? gControlMem : type == T970AudioMemoryOutput ? gRingMem : nullptr;
+    IOBufferMemoryDescriptor *m = type == T970AudioMemoryControl ? gControlMem : type == T970AudioMemoryOutput ? gRingMem :
+                                  type == T970AudioMemoryInput ? gRingInMem : nullptr;
     if (m) m->retain();
     return m;
 }
@@ -1445,7 +1676,12 @@ extern "C" int t970_audio_request(uint32_t selector) {
     switch (selector) {
     case T970AudioStartOutput: __atomic_or_fetch(&gWant, T970AudioOutputRunning, __ATOMIC_ACQ_REL); break;
     case T970AudioStopOutput: __atomic_and_fetch(&gWant, ~T970AudioOutputRunning, __ATOMIC_ACQ_REL); break;
-    case T970AudioStartInput: case T970AudioStopInput: return 0;   // no capture path: accepted, nothing to do
+    case T970AudioStartInput:
+        if (!gRingIn) return 0;   // capture off (t970-audio bit 8388608): accepted, nothing to do
+        __atomic_or_fetch(&gWant, T970AudioInputRunning, __ATOMIC_ACQ_REL); break;
+    case T970AudioStopInput:
+        if (!gRingIn) return 0;
+        __atomic_and_fetch(&gWant, ~T970AudioInputRunning, __ATOMIC_ACQ_REL); break;
     default: return -1;
     }
     IOLockWakeup(gLock, &gCount, false);

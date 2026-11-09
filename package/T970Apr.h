@@ -72,6 +72,18 @@ extern "C" {
 #define ASM_NULL_POPP_TOPOLOGY 0x00010C68u
 #define ASM_FMT_MULTI_CHANNEL_PCM_V2 0x00010DA5u
 
+/* Capture (the microphones): codec DMA TX port, ADM TX path, ASM read stream (downstream apr_audio-v2.h, q6asm.c, q6afe.c). */
+#define AFE_PARAM_ID_CODEC_DMA_CONFIG 0x000102B8u
+#define AFE_PORT_ID_TX_CODEC_DMA_TX_3 0xB037u
+#define AFE_PORT_ID_VA_CODEC_DMA_TX_0 0xB021u
+#define ADM_MATRIX_ID_AUDIO_RX 0u
+#define ADM_MATRIX_ID_AUDIO_TX 1u
+#define ASM_STREAM_CMD_OPEN_READ_V3 0x00010DB4u
+#define ASM_STREAM_CMD_SET_ENCDEC_PARAM 0x00010C10u
+#define ASM_PARAM_ID_ENCDEC_ENC_CFG_BLK_V2 0x00010DA3u
+#define ASM_DATA_CMD_READ_V2 0x00010DACu
+#define ASM_DATA_EVENT_READ_DONE_V2 0x00010D9Au
+
 /* The one TDM interface the speaker amplifiers sit on (live FDT /soc/qcom,msm-dai-tdm-pri-rx). */
 typedef struct {
     uint16_t port, group;           /* 0x9000, 0x9100 */
@@ -100,10 +112,18 @@ uint32_t apr_asm_session(uint8_t *out, uint16_t session, uint32_t opcode);   /* 
 uint32_t apr_asm_map(uint8_t *out, uint16_t session, uint64_t address, uint32_t bytes);
 uint32_t apr_asm_unmap(uint8_t *out, uint16_t session, uint32_t handle);
 uint32_t apr_asm_write(uint8_t *out, uint16_t session, uint32_t token, uint64_t address, uint32_t handle, uint32_t bytes, uint32_t seq);
+/* Capture. path: 1 RX (playback), 2 TX (capture); matrix: ADM_MATRIX_ID_AUDIO_RX / _TX. */
+uint32_t apr_afe_cdc_dma(uint8_t *out, uint32_t token, uint16_t port, uint32_t rate, uint16_t bits, uint16_t channels, uint16_t mask);
+uint32_t apr_adm_open_path(uint8_t *out, uint32_t token, uint16_t port, uint16_t path, uint32_t rate, uint16_t channels, uint16_t bits);
+uint32_t apr_adm_map_matrix(uint8_t *out, uint32_t token, uint32_t matrix, uint16_t session, uint16_t copp);
+uint32_t apr_asm_open_read(uint8_t *out, uint16_t session, uint16_t bits);
+uint32_t apr_asm_enc_pcm(uint8_t *out, uint16_t session, uint32_t rate, uint16_t channels, uint16_t bits);
+uint32_t apr_asm_read(uint8_t *out, uint16_t session, uint32_t token, uint64_t address, uint32_t handle, uint32_t bytes, uint32_t seq);
 
 /* An answer. kind: AprBasic (result_opcode, status), AprCoreState (status = state), AprCoreFwk (words[0..4]), AprCoreVersions
  * (words[0..1]), AprAdmOpened (status, value = copp), AprMapped (value = handle), AprWriteDone (address, value = handle, status),
- * AprVote (status = client handle), AprOther. */
+ * AprVote (status = client handle), AprReadDone (status, address, value = handle, words[0] = bytes, words[1] = offset, words[2..3]
+ * time stamp, words[4] = flags; src_port = the session's stream port), AprOther. */
 typedef struct {
     uint32_t opcode, token, result_opcode, status, value;
     uint64_t address;
@@ -112,7 +132,8 @@ typedef struct {
     uint16_t src_port, dest_port;
     uint32_t payload_bytes;
 } AprAnswer;
-enum {AprBad = -1, AprOther = 0, AprBasic, AprCoreState, AprCoreFwk, AprCoreVersions, AprAdmOpened, AprMapped, AprWriteDone, AprVote};
+enum {AprBad = -1, AprOther = 0, AprBasic, AprCoreState, AprCoreFwk, AprCoreVersions, AprAdmOpened, AprMapped, AprWriteDone, AprVote,
+      AprReadDone};
 int apr_parse(const uint8_t *in, uint32_t length, AprAnswer *a);
 
 #ifdef __cplusplus

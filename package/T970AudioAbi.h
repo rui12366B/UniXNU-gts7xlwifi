@@ -14,10 +14,10 @@
 
 #define T970_AUDIO_CLASS "T970Audio"
 #define T970_AUDIO_MAGIC 0x54394155u        /* 'T9AU' */
-#define T970_AUDIO_VERSION 2u   /* 2: the volume moved to the amplifiers (out_volume_*) */
+#define T970_AUDIO_VERSION 3u   /* 2: the volume moved to the amplifiers (out_volume_*); 3: capture (in_*), out_taken */
 #define T970_AUDIO_RATE 48000u
 #define T970_AUDIO_OUT_CHANNELS 2u
-#define T970_AUDIO_IN_CHANNELS 0u          /* no capture path yet: memory type 2 is absent */
+#define T970_AUDIO_IN_CHANNELS 1u          /* the microphone (mono); control in_channels is 0 while capture is off (t970-audio bit) */
 #define T970_AUDIO_PERIOD_FRAMES 480u        /* 10 ms */
 #define T970_AUDIO_RING_FRAMES 65536u        /* 1.37 s: room for the 300 ms lead and the audio server's late IO cycles */
 
@@ -39,8 +39,7 @@ typedef struct {
     volatile uint32_t out_late, in_late;     /* periods the service had to send or deliver without fresh data */
     volatile uint32_t out_seq, in_seq;       /* incremented around anchor updates (odd while writing) */
     volatile uint64_t out_written;           /* the plug-in: the sample time after the last frame it wrote */
-    volatile uint64_t in_written;            /* the service: the sample time after the last captured frame in the ring;
-                                              * gts7xlwifi (no capture): the playback frame the service takes next */
+    volatile uint64_t in_written;            /* the service: the sample time after the last captured frame in the ring */
     volatile uint64_t out_written_host;      /* the plug-in: host time of its last write */
     volatile uint32_t out_holes;             /* the service: written periods that held a run of 64 or more silent frames */
     /* gts7xlwifi: the output volume, applied by the amplifiers' digital volume (0.125 dB steps in their own wide path) rather than by
@@ -48,6 +47,7 @@ typedef struct {
      * out_volume_mdb (milli-dB, T970_AUDIO_MUTE_MDB mutes), then increments out_volume_seq; the service applies each new seq. */
     volatile int32_t out_volume_mdb;
     volatile uint32_t out_volume_seq;
+    volatile uint64_t out_taken;             /* the service: the playback frame it takes next (was in_written before capture) */
 } T970AudioControl;
 #define T970_AUDIO_MUTE_MDB (-200000)
 
@@ -102,6 +102,10 @@ typedef struct {
     volatile int32_t vol_kind, vol_raw_milli, vol_element;
     volatile uint32_t gain_now, gain_min, gain_max;
     volatile uint32_t vol_history[8], vol_history_count;
+    /* capture: input reads, reads that asked for frames the service had not captured yet (they read silence), the least and most
+     * distance of the read's end behind the captured end (frames) */
+    volatile uint32_t mic_reads, mic_short;
+    volatile int32_t mic_behind_min, mic_behind_max;
 } T970AudioDiag;
 /* After it, every distinct property access in the order the audio server made it: selector, then object << 24 | scope's first byte << 16 |
  * kind (1 set, 0 get) | 2 if it failed. */

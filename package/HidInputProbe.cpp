@@ -33,6 +33,7 @@ extern "C" IOService *native_hid_touch_allocate(void);
 extern "C" IOService *native_hid_accel_allocate(void);
 extern "C" IOService *native_hid_orient_allocate(void);
 extern "C" IOService *native_hid_gyro_allocate(void);
+extern "C" IOService *native_hid_pen_allocate(void);
 extern "C" kern_return_t OSKextLoadKextWithIdentifier(const char *);
 extern "C" size_t qcom_usb_debug_write(const void *, size_t);
 
@@ -48,6 +49,8 @@ volatile uint32_t native_hid_touch_status;
 // gts7xlwifi accelerometer device (t970-sensors bit 16 or 32): 0 not asked for, 1 started, 2 refused to start.
 volatile uint32_t native_hid_accel_status, native_hid_orient_status, native_hid_gyro_status;
 volatile uint64_t native_hid_accel_object;
+// gts7xlwifi S Pen device (t970-pen bit 4): 0 not asked for, 1 started, 2 refused to start.
+volatile uint32_t native_hid_pen_status;
 volatile uintptr_t native_hid_props_driver;
 // The publisher's tick asks whether it should run. The touch core feeds it directly through
 // the sink, so nothing has to poll: answer yes once the board has asked for the digitizer.
@@ -174,6 +177,19 @@ extern "C" int native_hid_input_probe(void) {
       OSSafeReleaseNULL(gyro);
     }
     native_hid_gyro_status = gyroStarted ? 1 : 2;
+  }
+  // gts7xlwifi S Pen (package/T970Pen.cpp, t970-pen bit 4): by default the touch device carries it in its own report 3 (NativeHidInput);
+  // with bit 2048 a fourth IOHIDDevice, the stylus digitizer (or with bit 8 a one-contact touch screen), as in combo23/24b, whose
+  // service backboardd never listed. It stamps its own event driver (NativeHidInput stampPen), not through native_hid_live_checkpoint.
+  unsigned pen = 0;
+  if (PE_parse_boot_argn("t970-pen", &pen, sizeof pen) && (pen & 4) && (pen & 2048)) {
+    IOService *stylus = native_hid_pen_allocate();
+    bool penStarted = stylus && stylus->metaCast("IOHIDDevice") && stylus->init() && stylus->attach(resource) && stylus->start(resource);
+    if (!penStarted && stylus) {
+      stylus->detach(resource);
+      OSSafeReleaseNULL(stylus);
+    }
+    native_hid_pen_status = penStarted ? 1 : 2;
   }
   result = 0;
   OSSafeReleaseNULL(resource);

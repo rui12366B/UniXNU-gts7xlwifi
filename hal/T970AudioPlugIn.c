@@ -43,6 +43,7 @@ static atomic_uint gRefs = 1;
 static io_connect_t gConnect;
 static T970AudioControl *gControl;
 static int16_t *gOut;
+static int16_t *gIn;   // the capture ring (mono), mapped only when the service captures (control in_channels)
 static UInt32 gIoUsers;
 static Float32 gVolume = 1.0f;   // the volume control's scalar (slider position)
 static void publishVolume(void);
@@ -70,6 +71,8 @@ static int connectService(void) {
     }
     T970AudioControl *c = control;
     if (c->magic != T970_AUDIO_MAGIC || c->version != T970_AUDIO_VERSION) {IOServiceClose(gConnect); gConnect = 0; return -1;}
+    void *in = NULL;
+    if (c->in_channels && !mapType(T970AudioMemoryInput, &in)) gIn = in;
     gOut = out; gControl = c;
     gHostTicksPerFrame = (Float64)c->ticks_per_frame_q32 / 4294967296.0;
     setHostClock();
@@ -252,6 +255,7 @@ static UInt32 objects(AudioObjectID o, AudioObjectPropertyScope scope, AudioObje
     if (o == kPlugIn) list[n++] = kDevice;
     else if (o == kDevice) {
         if (scope != kAudioObjectPropertyScopeInput) list[n++] = kOutStream;
+        if (scope != kAudioObjectPropertyScopeOutput && gIn) list[n++] = kInStream;   // the microphone, when the service captures
         if (scope != kAudioObjectPropertyScopeInput) list[n++] = kVolume;
     }
     return n;
@@ -345,7 +349,7 @@ static OSStatus propertyData(AudioObjectID o, const AudioObjectPropertyAddress *
         case kAudioObjectPropertyOwnedObjects:
         case kAudioDevicePropertyStreams:
         case kAudioObjectPropertyControlList: {
-            AudioObjectID list[3];
+            AudioObjectID list[4];
             UInt32 n = objects(kDevice, a->mScope, list), out = 0;
             for (UInt32 i = 0; i < n; ++i) {
                 if (s == kAudioDevicePropertyStreams && list[i] == kVolume) continue;
@@ -357,6 +361,9 @@ static OSStatus propertyData(AudioObjectID o, const AudioObjectPropertyAddress *
         }
         default: return kAudioHardwareUnknownPropertyError;
         }
+    case kInStream:
+        if (!gIn) return kAudioHardwareBadObjectError;
+        /* fall through */
     case kOutStream: {
         const UInt32 channels = o == kOutStream ? 2 : 1;
         switch (s) {
@@ -561,6 +568,7 @@ static OSStatus StartIO(AudioServerPlugInDriverRef d, AudioObjectID o, UInt32 cl
             setHostClock();   // again: the shared page may have been read back from disk since
             if (call(T970AudioStartOutput) != KERN_SUCCESS) r = kAudioHardwareNotRunningError;
             else {
+                if (gIn) call(T970AudioStartInput);
                 const uint64_t host = mach_absolute_time(), anchor = gControl->out_anchor_host;
                 gZeroOrigin = host > anchor ? (uint64_t)((Float64)(host - anchor) / gHostTicksPerFrame) : 0;
                 gZeroSeed++;
@@ -575,7 +583,7 @@ static OSStatus StopIO(AudioServerPlugInDriverRef d, AudioObjectID o, UInt32 cli
     (void)d; (void)client;
     if (o != kDevice) return kAudioHardwareBadObjectError;
     pthread_mutex_lock(&gLock);
-    if (gIoUsers && --gIoUsers == 0) call(T970AudioStopOutput);
+    if (gIoUsers && --gIoUsers == 0) {call(T970AudioStopOutput); if (gIn) call(T970AudioStopInput);}
     pthread_mutex_unlock(&gLock);
     return 0;
 }
@@ -596,7 +604,7 @@ static OSStatus GetZeroTimeStamp(AudioServerPlugInDriverRef d, AudioObjectID o, 
 }
 static OSStatus WillDoIOOperation(AudioServerPlugInDriverRef d, AudioObjectID o, UInt32 client, UInt32 op, Boolean *will, Boolean *inPlace) {
     (void)d; (void)o; (void)client;
-    *will = op == kAudioServerPlugInIOOperationWriteMix;
+    *will = op == kAudioServerPlugInIOOperationWriteMix || (gIn && op == kAudioServerPlugInIOOperationReadInput);
     *inPlace = true;
     return 0;
 }
@@ -692,7 +700,7 @@ static OSStatus DoIOOperation(AudioServerPlugInDriverRef d, AudioObjectID o, Aud
             }
         }
         // gts7xlwifi: a write that starts before the frame the service takes next lost its beginning (the service took it already).
-        if (t < gControl->in_written) diag->in_misses += 1;
+        if (t < gControl->out_taken) diag->in_misses += 1;
         // test_flags bit 0 (t970-audio bit 1024): the plug-in's own 1 kHz sine at -18 dBFS in place of the mix, on these sample times.
         // test_flags bit 1 (t970-audio bit 8192): the kernel's chirp (T970Audio.cpp chirpSample) generated here, through the ring:
         // 4 s log sweep 100 Hz -> 16 kHz, 0.5 s silence, 2 s 440 + 3520 Hz, at 2000/32767, starting at the first write after load.
@@ -743,6 +751,18 @@ static OSStatus DoIOOperation(AudioServerPlugInDriverRef d, AudioObjectID o, Aud
         }
         if (t > gControl->out_written) gControl->out_written = t;
         gControl->out_written_host = host;
+    } else if (op == kAudioServerPlugInIOOperationReadInput && stream == kInStream && gIn) {
+        // The microphone ring, mono 16-bit, on the same timeline: frames the service has not captured yet read as silence (counted).
+        Float32 *dst = main;
+        uint64_t t = (uint64_t)info->mInputTime.mSampleTime;
+        const uint64_t written = __atomic_load_n(&gControl->in_written, __ATOMIC_ACQUIRE);
+        const int32_t behind = (int32_t)((int64_t)written - (int64_t)(t + frames));
+        if (!diag->mic_reads || behind < diag->mic_behind_min) diag->mic_behind_min = behind;
+        if (!diag->mic_reads || behind > diag->mic_behind_max) diag->mic_behind_max = behind;
+        diag->mic_reads += 1;
+        if (t + frames > written) diag->mic_short += 1;
+        for (UInt32 i = 0; i < frames; ++i, ++t)
+            dst[i] = t < written && written - t <= T970_AUDIO_RING_FRAMES ? gIn[t % T970_AUDIO_RING_FRAMES] / 32768.0f : 0.0f;
     }
     return 0;
 }

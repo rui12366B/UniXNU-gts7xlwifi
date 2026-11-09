@@ -138,24 +138,23 @@
  #include <sys/kdebug.h>
  
  
-@@ -1225,6 +1226,36 @@
- 
- 	/* Falsify results instead of returning error? */
+@@ -1227,12 +1228,44 @@
  	return error;
-+}
-+
+ }
+ 
 +/* gts7xlwifi (patches/xnu/t970-wifi-service-mount.patch): with t970-wifi-svc=1 the board's owner services at exactly these Data paths
-+ * (addon wifi-bin/ and bt-bin/) are exempt from the Sandbox policy's exec check, which the platform profile applies to xpcproxy
++ * (addon wifi-bin/; bt-bin/ BlueTool and bluetoothd) are exempt from the Sandbox policy's exec check, which the platform profile applies to xpcproxy
 + * ("process-exec*", combo12), and from AMFI's launch constraints (security/mac_process.c; combo15b "Launch Constraint Violation ...
 + * Constraint not matched": an owner-trusted binary has no platform constraint category). AMFI still checks their signatures against
 + * the owner trust cache; any other path, or no boot argument, is unchanged. */
 +int t970_service_exec_exempt(struct vnode *vp);
-+int
+ int
 +t970_service_exec_exempt(struct vnode *vp)
 +{
 +	static const char *const exempt[] = {
 +		"/private/var/ngpu/wifi-bin/unixnu-wpa_supplicant",
 +		"/private/var/ngpu/bt-bin/BlueTool",
++		"/private/var/ngpu/bt-bin/bluetoothd",   /* the BT session's bluetoothd with in-memory root keys (keychain -25291) */
 +	};
 +	uint32_t service = 0;
 +	char path[64];
@@ -172,10 +171,11 @@
 +		}
 +	}
 +	return 0;
- }
- 
- int
-@@ -1233,6 +1264,7 @@
++}
++
++int
+ mac_vnode_check_exec(vfs_context_t ctx, struct vnode *vp,
+     struct image_params *imgp)
  {
  	kauth_cred_t cred;
  	int error = 0;
@@ -183,7 +183,7 @@
  
  #if SECURITY_MAC_CHECK_ENFORCE
  	/* 21167099 - only check if we allow write */
-@@ -1260,7 +1292,7 @@
+@@ -1260,7 +1293,7 @@
  			}
  
  			mpo_vnode_check_exec_t *hook = mpc->mpc_ops->mpo_vnode_check_exec;
@@ -192,7 +192,7 @@
  				continue;
  			}
  
-@@ -1281,7 +1313,7 @@
+@@ -1281,7 +1314,7 @@
  				}
  
  				mpo_vnode_check_exec_t *hook = mpc->mpc_ops->mpo_vnode_check_exec;

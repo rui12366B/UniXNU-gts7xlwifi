@@ -39,18 +39,44 @@ ROOT = Path(__file__).resolve().parents[1]
 JOB = '/System/Library/LaunchDaemons/com.apple.BlueTool.plist'
 OWNER_LABEL = 'org.unixnu.bluetooth.bluetool'
 DAEMON = '/System/Library/LaunchDaemons/com.apple.bluetoothd.plist'
-# 21H461 /usr/sbin/bluetoothd (arm64, ad hoc, UUID 0F836381-D07B-36E4-9DBB-8A44782B9C14) and the one patch the board needs so far.
-# combo22's unified log: readRootKeys -> _BTKCGetDataCopy -25300 -> "Generating new identity root" -> SecItemAdd -25291
-# (errSecNotAvailable: no working keychain on this board yet) -> "Failed to set new identity root!" -> "Bluetooth error - restarting
-# { reason=130 }" -> _exit(1), every ~10 s, before bluetoothd ever asks BlueTool to boot the controller. 0x1002d1eb4 stores the global
-# root keys (Encryption / Identity / Cloud roots, 21 callers); returning success keeps them in memory for the daemon's lifetime, the
-# behaviour UniXNU/QcaBluetooth's iPadOS 27 adapter documents ("If the keychain does not answer, root keys stay in memory"). Pairings
-# then do not survive a reboot until the keychain works.
+# 21H461 /usr/sbin/bluetoothd (arm64, ad hoc, UUID 0F836381-D07B-36E4-9DBB-8A44782B9C14) and the patches the board needs so far, as
+# (file offset, original 4-byte words, patched words).
 BLUETOOTHD_SHA256 = '3f1e4493ea6a76976625f7af58a8f330c0c90d82d9020b11110b4f3f5b758df4'
-BLUETOOTHD_PATCHES = (
-    # (file offset, original 4-byte words, patched words): mov w0, #0 ; ret
-    (0x2d1eb4, (0xa9bc5ff8, 0xa90157f6), (0x52800000, 0xd65f03c0)),
-)
+BLUETOOTHD_PATCHES = {
+    # combo23 (keychain working, stock daemon): HCI init reads Supported Commands, LE features and data length, then
+    # 0x1001840a0 submits the optional Write Default Erroneous Data Reporting (0x0c5b, descriptor 0x7c). The QCA6390 does not set its
+    # support bit (byte 18 bit 3; the mask byte is 0x83), so the submit fails locally with status 628, and the step hands 628 to the
+    # chain advance 0x10023e254 -> "HCI initialization failed" -> "Bluetooth error - restarting { reason=108 }" every run. Pass 0
+    # instead (mov x1, x19 -> mov x1, xzr): the step still logs the rejection and the native chain continues. Same rule as
+    # UniXNU/QcaBluetooth's iPadOS 27 adapter ("Optional command 0x0c5b ... unsupported controllers advance through the native
+    # initialization chain").
+    'optional-0c5b': ((0x18410c, (0xaa1303e1,), (0xaa1f03e1,)),),
+    # combo24b: with 0x0c5b skipped each session runs ~0.1 s longer (more HCI) and still restarts, with no unified log on disk to name
+    # the step. Several init steps already treat status 628 (0x274: the command is not in the controller's supported-commands bitmap,
+    # so the stack never sends it) as "skip" and advance with 0x10023e1f0; the rest hand the 628 to the chain advance 0x10023e254,
+    # which aborts initialization. Map 628 to 0 at its entry so every optional command the QCA6390 lacks (54 of the stack's
+    # descriptors, e.g. LE Read Buffer Size v2 0x2060) is skipped the same way. Other statuses (controller errors, 0x278 timeouts)
+    # still fail. mov x19, x1 ; mov x20, x0 ; adrp ; nop  ->  cmp w1, #0x274 ; csel x19, xzr, x1, eq ; adrp ; mov x20, x0.
+    'unsupported-628': ((0x23e260, (0xaa0103f3, 0xaa0003f4, 0xf0003828, 0xd503201f), (0x7109d03f, 0x9a8103f3, 0xf0003828, 0xaa0003f4)),),
+    # combo25: init completes; the first LE scan then fails: LE Set Scan Parameters (0x200b) -> 0x0c Command Disallowed ->
+    # "Could not start LE scan ... STATUS 712" -> "Bluetooth error - restarting { reason=712 }" (Read LE Advertising TX Power 0x2007
+    # also got 0x0c). Init step 0x100183ae8 sends LE Read Periodic Advertiser List Size (0x204a) when the controller reports the
+    # periodic-advertising feature. That is one of the spec's extended advertising commands, and after it the controller rejects every
+    # legacy advertising/scan command (Core spec Vol 4 Part E 3.1.1). Periodic advertising is disabled in this stack anyway. Take the
+    # step's own skip exit (as when the feature is absent): tbz w8, #5, 0x100183b30 -> b 0x100183b30.
+    'legacy-le-only': ((0x183b0c, (0x36280128,), (0x14000009,)),),
+    # combo26: with 0x204a gone the first scan gets further, then "Reset scan in LE_Scan: STATUS 718" -> reason=718. 718 = 700 + 0x12
+    # Invalid HCI Command Parameters: the scan parameters name a random own address, and the controller's random address was never
+    # set (0x2005), which the spec answers with 0x12 on scan enable (UniXNU/QcaBluetooth's iPadOS 27 adapter hit the same). Use the
+    # public address (own_address_type 0) in both LE Set Scan Parameters builders (0x100068004: ldurb w9,[x29,#-0x28];
+    # 0x100078ad8: ldurb w8,[x29,#-0x60], also the extended variant's first parameter) -> mov w9/w8, #0. A passive scan sends no
+    # packets, so this only affects active scans' SCAN_REQ address.
+    'public-scan-address': ((0x68004, (0x385d83a9,), (0x52800009,)), (0x78ad8, (0x385a03a8,), (0x52800008,))),
+    # combo22 (no keychain): readRootKeys -> SecItemAdd -25291 -> "Failed to set new identity root!" -> reason 130 -> _exit(1).
+    # 0x1002d1eb4 stores the global root keys; returning success keeps them in memory (mov w0, #0 ; ret). Not needed since the
+    # keychain AKS fix (combo23: no -25291); kept behind --volatile-root-keys.
+    'volatile-root-keys': ((0x2d1eb4, (0xa9bc5ff8, 0xa90157f6), (0x52800000, 0xd65f03c0)),),
+}
 OWNER_JOB = f'/System/Library/LaunchDaemons/{OWNER_LABEL}.plist'
 
 
@@ -87,9 +113,11 @@ def main():
                         help='also give com.apple.bluetoothd OS_ACTIVITY_DT_MODE=YES (its os_log mirrored to stderr) and this '
                              'StandardOut/ErrorPath, exported by package/BootDiagExport.c ("" leaves bluetoothd as it is)')
     parser.add_argument('--bluetoothd', type=Path,
-                        help='the OS\'s /usr/sbin/bluetoothd (21H461, sha256-checked): patched (root keys in memory), re-signed ad hoc as '
+                        help='the OS\'s /usr/sbin/bluetoothd (21H461, sha256-checked): patched (optional HCI command 0x0c5b), re-signed ad hoc as '
                              'com.apple.bluetoothd with its own entitlements, shipped as <bin-prefix>/bluetoothd, and the job pointed at '
                              'it (--bluetoothd-exec). Its exact path needs the Wi-Fi patch\'s exec exemption too.')
+    parser.add_argument('--volatile-root-keys', action='store_true',
+                        help='also keep root keys in memory when the keychain cannot store them (combo22; not needed with the AKS fix)')
     parser.add_argument('--bluetoothd-exec', default='/private/var/ngpu/bt-bin/bluetoothd')
     parser.add_argument('--cache-prefix', default='wifi-xpc',
                         help='addon directory of the cache (wifi-xpc -> /private/var/ngpu/wifi-xpc, mounted over /System/Library/xpc '
@@ -163,7 +191,8 @@ def main():
         data = bytearray(args.bluetoothd.read_bytes())
         if hashlib.sha256(data).hexdigest() != BLUETOOTHD_SHA256:
             raise SystemExit('bluetoothd is not the 21H461 binary the patch table was made for')
-        for offset, old, new in BLUETOOTHD_PATCHES:
+        chosen = ['optional-0c5b', 'unsupported-628', 'legacy-le-only', 'public-scan-address'] + (['volatile-root-keys'] if args.volatile_root_keys else [])
+        for offset, old, new in (site for name in chosen for site in BLUETOOTHD_PATCHES[name]):
             if struct.unpack_from(f'<{len(old)}I', data, offset) != old:
                 raise SystemExit(f'bluetoothd patch site {offset:#x} does not hold the expected instructions')
             struct.pack_into(f'<{len(new)}I', data, offset, *new)

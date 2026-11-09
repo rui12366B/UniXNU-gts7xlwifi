@@ -1,0 +1,21 @@
+--- a/bsd/vfs/vfs_lookup.c
++++ b/bsd/vfs/vfs_lookup.c
+@@ -1364,7 +1364,17 @@
+ 	if (error) {
+ lookup_error:
+ #if CONFIG_UNION_MOUNTS
+-		if ((error == ENOENT) &&
++		/*
++		 * gts7xlwifi: "/" is the SystemOS cryptex (System/, usr/ only) mounted read-only with MNT_UNION over the OS root.
++		 * For a CREATE/RENAME of the last component a read-only upper layer answers EROFS (or EJUSTRETURN) instead of
++		 * ENOENT, so the name was never looked for below: mkdir("/var") or mkdir("/Library") gave EROFS where the base
++		 * system has the entry and iOS returns EEXIST. That broke every mkdir -p style walk from "/" (IPConfiguration's
++		 * /var/db/dhcpclient/leases, SCPreferences' parent directories). Search the covered layer in that case too; a name
++		 * missing there still fails as before, and a writable upper layer keeps the stock behaviour.
++		 */
++		if ((error == ENOENT ||
++		    ((error == EROFS || error == EJUSTRETURN) && (cnp->cn_flags & ISLASTCN) &&
++		    dp->v_mount != NULL && (dp->v_mount->mnt_flag & MNT_RDONLY))) &&
+ 		    (dp->v_mount != NULL) &&
+ 		    (dp->v_mount->mnt_flag & MNT_UNION)) {
+ 			tdp = dp;
