@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Diagnostic file export (int-217): the unified log that logd persisted (/private/var/db/diagnostics, with the format strings in
 // /private/var/db/uuidtext) and the crash reports, read by the kernel itself, so neither a sandbox nor a launchd job that never runs
-// (adrenoprobed) stands in the way. BootLog.c asks for the stream once (sheng-diag-export=<seconds>) and writes it into the half of the
+// (adrenoprobed) stands in the way. BootLog.c asks for the stream once (diag-export=<seconds>) and writes it into the half of the
 // export region the pipeline-cache blob does not hold; scripts/read-sheng-log.py unpacks it into the run's diag/ directory.
 // Stream: "SHEXR001", u32 stream bytes, u32 0, then the cache export's stream (drivers/AdrenoMetal/CacheExport.h, "M2VCACH1") with root
 // "/" and every path relative to it. The scan lists every file first and spends the budget in the order of worth (the log newest file
@@ -36,6 +36,11 @@ static const char *const diag_roots[] = {
   // board's BlueTool, which writes every XPC message and script result there. Small text files, first in line.
   "/private/var/log/bluetoothd.log",
   "/private/var/log/unixnu-bluetool.log",
+  // gts7xlwifi camera (scripts/build-t970camerad.py): the CoreMediaIO camera extension daemons' stderr (start, kernel service, host
+  // connects, stream start/stop, errors).
+  "/private/var/log/t970camerad.log",
+  "/private/var/log/t970camerad-uvc.log",
+  "/private/var/log/t970camerad-avf.bmp",   // C6b probe: the first frame AVFoundation delivered, 320 wide
   "/private/var/mobile/Library/Caches/com.apple.backboardd/m2v/prime.log",
   "/private/var/mobile/Library/Caches/com.apple.backboardd/m2v/prime-bad",
   "/private/var/root/Library/Caches/com.apple.backboardd/m2v/prime.log",

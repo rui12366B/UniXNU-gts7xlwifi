@@ -65,10 +65,19 @@ static const unsigned char accelDescriptor[]={
 // portrait upside down, 0x67 landscape left, 0x68 landscape right, 0x69 face up, 0x6a face down; the range parseDeviceOrientationElement
 // of the donor IOHIDEventDriver checks) as one bit each. handleDeviceOrientationReport sends an orientation event (CM usage type) for
 // a flag that went from 0 to 1.
+// After the flags, an AppleVendor Message physical collection (0xff00/0x23) with one 64-bit element on page 0xff15, usage 2: the
+// sample's timestamp. IOHIDEventDriver turns an element of such a collection into a vendor-defined child event of the next event it
+// dispatches (handleVendorMessageReport, kIOHandleChildVendorMessageReport), and locationd reads its orientation sample time from
+// exactly that child (0x1014899d4 in the 21H461 locationd: first child, page 0xff15, usage 2, 8 bytes). Without it every orientation
+// arrived with time 0 and CLOrientationNotifier::notifyAOO dropped it: "Skipping stale orientation (N @ 0)" (main4). The value only has
+// to grow; the device puts mach_absolute_time() in it. Report 5 is 10 bytes: id, flags, 8 bytes of time.
 static const unsigned char orientDescriptor[]={
     0x05,0x20,0x09,0x8a,0xa1,0x01,0x85,0x05,
     0x06,0x0c,0xff,0x19,0x64,0x29,0x6a,0x15,0x00,0x25,0x01,0x75,0x01,0x95,0x07,0x81,0x02,
-    0x75,0x01,0x95,0x01,0x81,0x03,0xc0
+    0x75,0x01,0x95,0x01,0x81,0x03,
+    0x06,0x00,0xff,0x09,0x23,0xa1,0x00,
+    0x06,0x15,0xff,0x09,0x02,0x15,0x00,0x26,0xff,0x00,0x75,0x40,0x95,0x01,0x81,0x02,
+    0xc0,0xc0
 };
 // Gyro (report 6): Data Field Angular Velocity about X/Y/Z (0x457-0x459) in the Gyrometer collection (0x20/0x7a, which the same
 // personality matches), int16 in mrad/s with unit exponent -3, so handleGyroReport gives rad/s. locationd's orientation detector
@@ -94,13 +103,16 @@ extern "C" {volatile uint32_t native_accel_hid[5], native_orient_hid[5], native_
 // The application usage is the device's PrimaryUsage, which the HID event system reads once, when the service appears; backboardd takes
 // digitizer events only from PrimaryUsage 1, 4 or 0x20. combo23 announced Pen (2): 673 reports accepted by handleReport, none reached the
 // UI, and the later stamp to 0x20 came after the service had been created. Digitizer (1) is accepted as published.
+// Tip Pressure is declared -4095..4095 although only 0..4095 is sent: IOHIDEventDriver reads it with getScaledFixedValue(Calibrated)
+// and never calibrates pressure, and an uncalibrated element maps its logical range onto -1..1 (IOHIDElementPrivate). With 0..4095
+// a light press arrived as -1 and only a full press as +1; with -4095..4095 the event's tip pressure is p/4095, 0..1.
 static const unsigned char penDescriptor[]={
     0x05,0x0d,0x09,0x01,0xa1,0x01,0x85,0x07,
     0x09,0x20,0xa1,0x00,
     0x09,0x42,0x09,0x44,0x09,0x3c,0x09,0x45,0x09,0x32,0x15,0x00,0x25,0x01,0x75,0x01,0x95,0x05,0x81,0x02,
     0x95,0x03,0x81,0x03,
     0x05,0x01,0x09,0x30,0x09,0x31,0x15,0x00,0x26,0xff,0x7f,0x75,0x10,0x95,0x02,0x81,0x02,
-    0x05,0x0d,0x09,0x30,0x15,0x00,0x26,0xff,0x0f,0x75,0x10,0x95,0x01,0x81,0x02,
+    0x05,0x0d,0x09,0x30,0x16,0x01,0xf0,0x26,0xff,0x0f,0x75,0x10,0x95,0x01,0x81,0x02,
     0x09,0x3d,0x09,0x3e,0x15,0xc1,0x25,0x3f,0x35,0xc1,0x45,0x3f,0x65,0x14,0x55,0x00,0x75,0x08,0x95,0x02,0x81,0x02,
     0x65,0x00,0x35,0x00,0x45,0x00,
     0xc0,0xc0
@@ -128,7 +140,7 @@ static const unsigned char stylusCollection[]={
     0x95,0x03,0x81,0x03,
     0x09,0x51,0x75,0x08,0x95,0x01,0x15,0x00,0x26,0xff,0x00,0x81,0x02,
     0x05,0x01,0x09,0x30,0x09,0x31,0x15,0x00,0x26,0xff,0x7f,0x75,0x10,0x95,0x02,0x81,0x02,
-    0x05,0x0d,0x09,0x30,0x15,0x00,0x26,0xff,0x0f,0x75,0x10,0x95,0x01,0x81,0x02,
+    0x05,0x0d,0x09,0x30,0x16,0x01,0xf0,0x26,0xff,0x0f,0x75,0x10,0x95,0x01,0x81,0x02,
     0x09,0x3d,0x09,0x3e,0x15,0xc1,0x25,0x3f,0x35,0xc1,0x45,0x3f,0x65,0x14,0x55,0x00,0x75,0x08,0x95,0x02,0x81,0x02,
     0x65,0x00,0x35,0x00,0x45,0x00,
     0xc0
@@ -140,6 +152,7 @@ enum {kPenContact=10,kTouchReport=1+TOUCH_FINGERS*6+1,kStylusBytes=10,kTouchRepo
 // The pen driver hands every coordinate packet over packed (T970Pen.cpp pack()): x 0..14, y 15..29, pressure 30..41, tilt x 42..48,
 // tilt y 49..55 (7-bit signed), 56 tip, 57 barrel, 58 in range, 59 eraser end.
 extern "C" void native_pen_set_sink(void (*)(void *, uint64_t), void *) __attribute__((weak_import));
+extern "C" void t970_pen_note(const char *) __attribute__((weak_import));
 // [0] 1 separate device started (2 its event driver found and stamped), 3 in the touch device's report 3 as a stylus, 4 as a finger;
 // [1] reports sent, [2] refused, [3] dropped (no event driver yet, or ten fingers down for the finger), [4] last result
 extern "C" {volatile uint32_t native_pen_hid[5];}
@@ -218,6 +231,60 @@ static void install(IORegistryEntry *driver) {
     native_touch_edge_stats[0]=1;
 }
 }  // namespace edge
+// gts7xlwifi S Pen force. UIKit (donor 21H461 UIKitCore) takes a pencil touch's pressure from the event's
+// kIOHIDEventFieldDigitizerPressure and computes force = pressure / (120 x _AXSForceTouchSensitivity()), maximumPossibleForce =
+// maximum pressure / 120, where the maximum comes from the event's backboardd digitizer attributes (set only on the trackpad path)
+// or, for a pencil without them, 1000 (_UIEventHIDGetMaxForceForDigitizerEvent). IOHIDEventDriver can only produce 0..1 from Tip
+// Pressure (an uncalibrated element scales to -1..1; READY 10 made it 0..1), so main4 drew constant-width strokes (force <= 0.008).
+// The pencil device's driver gets its own wrapped dispatchEvent (same technique as edge::install) that multiplies each stylus
+// event's pressure by kScale (boot arg t970-pen-force, default 1000 = UIKit's maximum pressure). IOHIDEvent setFixedValue is
+// virtual slot 26 (IOHIDFamily-2031 IOHIDEvent.h: getType 18 ... getIntegerValue 23, setIntegerValue 24, getFixedValue 25).
+namespace pencil {
+enum {kSlots=256,kDispatch=198,kGetType=18,kGetInteger=23,kGetFixed=25,kSetFixed=26};
+enum : uint32_t {kDigitizer=11,kType=0xB0004,kStylus=0,kPressure=0xB000A};
+static uintptr_t originalDispatch;
+static int32_t scale=1000;
+extern "C" {volatile uint32_t native_pen_force_stats[3];}   // [0] installed, [1] stylus events scaled, [2] last pressure (IOFixed)
+template <typename R,typename... A> static R call(void *object,unsigned slot,A... args) {
+    return reinterpret_cast<R (*)(void *,A...)>((*reinterpret_cast<uintptr_t **>(object))[slot])(object,args...);
+}
+static void scaleOne(void *e) {
+    if(call<uint32_t,IOOptionBits>(e,kGetType,0)!=kDigitizer)return;
+    if((uint32_t)call<int32_t,uint32_t,IOOptionBits>(e,kGetInteger,kType,0)!=kStylus)return;
+    const int32_t p=call<int32_t,uint32_t,IOOptionBits>(e,kGetFixed,kPressure,0);   // IOFixed 0..1
+    if(p<=0)return;
+    const int64_t scaled=(int64_t)p*scale;
+    call<void,uint32_t,int32_t,IOOptionBits>(e,kSetFixed,kPressure,(int32_t)(scaled>0x7fffffff?0x7fffffff:scaled),0);
+    native_pen_force_stats[1]=native_pen_force_stats[1]+1;native_pen_force_stats[2]=(uint32_t)p;
+    if(native_pen_force_stats[1]==1 && &t970_pen_note) {
+        char line[64];snprintf(line,sizeof line,"force first p %d/65536 -> %lld/65536",p,(long long)scaled);t970_pen_note(line);
+    }
+}
+static void dispatch(IOService *self,OSObject *event,IOOptionBits options) {
+    if(event && call<uint32_t,IOOptionBits>(event,kGetType,0)==kDigitizer) {
+        OSArray *children=*reinterpret_cast<OSArray **>(reinterpret_cast<uint8_t *>(event)+24);
+        if(children && OSDynamicCast(OSArray,children)) {
+            for(unsigned i=0;i<children->getCount();++i) {
+                OSObject *child=children->getObject(i);
+                if(child && child->metaCast("IOHIDEvent"))scaleOne(child);
+            }
+        } else if(!children) scaleOne(event);
+    }
+    reinterpret_cast<void (*)(IOService *,OSObject *,IOOptionBits)>(originalDispatch)(self,event,options);
+}
+static void install(IORegistryEntry *driver) {
+    if(originalDispatch || !driver || scale<=1)return;
+    uintptr_t *table=*reinterpret_cast<uintptr_t **>(driver);
+    uintptr_t *copy=static_cast<uintptr_t *>(IOMalloc(kSlots*sizeof(uintptr_t)));
+    if(!copy)return;
+    memcpy(copy,table,kSlots*sizeof(uintptr_t));
+    originalDispatch=copy[kDispatch];copy[kDispatch]=(uintptr_t)&dispatch;
+    __asm__ volatile("dmb ish":::"memory");
+    *reinterpret_cast<uintptr_t **>(driver)=copy;
+    native_pen_force_stats[0]=1;
+    if(&t970_pen_note){char line[48];snprintf(line,sizeof line,"force wrapper on x%d",(int)scale);t970_pen_note(line);}
+}
+}  // namespace pencil
 class NativeHidInput : public IOHIDDevice {
     OSDeclareDefaultStructors(NativeHidInput)
     IOWorkLoop *inputLoop=nullptr;
@@ -231,6 +298,8 @@ class NativeHidInput : public IOHIDDevice {
     bool accelOnly=false;
     bool orientOnly=false;
     bool gyroOnly=false;
+    // t970-sensors as read at start (bit 256: the motion devices without the keyboard collection, the shape before main5).
+    unsigned sensorBits=0;
     // gts7xlwifi S Pen device; penBits is t970-pen (8 touch fallback, 256 Pen application collection, 512 stamp usage 4, 1024 no
     // collection dispatch). penTip: the fallback's contact was down in the last report.
     bool penOnly=false,penTip=false;
@@ -238,6 +307,7 @@ class NativeHidInput : public IOHIDDevice {
     // The touch device carrying the S Pen in its report 3 (t970-pen bit 4 without 2048): penAsFinger with bit 8, else the stylus
     // collection. penState: the pen's last packet (T970Pen.cpp packing); penRange: the stylus was in range in the last report.
     bool penMerged=false,penAsFinger=false,penRange=false;
+    unsigned penNoted=0,penTicks=0;   // the separate device's last noted client count + 1; seconds since start (tick)
     uint64_t penState=0;
     bool penStylus() const {return penMerged && !penAsFinger;}
     // The pen as one more finger, at its last position: down while the tip is, then one tip-up entry.
@@ -364,9 +434,15 @@ class NativeHidInput : public IOHIDDevice {
         const uint64_t v=uintptr_t(packed);
         if(self->orientOnly){self->lastOrient=v;self->orientDelivered=false;}
         if(!self->hasEventDriverCached()){stats[3]=stats[3]+1;return kIOReturnSuccess;}
-        unsigned char report[7]={static_cast<unsigned char>(self->orientOnly?5:self->gyroOnly?6:4)};
-        const unsigned length=self->orientOnly?2:7;
-        for(unsigned i=1;i<length;++i)report[i]=static_cast<unsigned char>(v>>(8*(i-1)));
+        unsigned char report[10]={static_cast<unsigned char>(self->orientOnly?5:self->gyroOnly?6:4)};
+        const unsigned length=self->orientOnly?10:7;
+        if(self->orientOnly) {
+            report[1]=static_cast<unsigned char>(v);
+            const uint64_t now=mach_absolute_time();   // the sample time locationd reads from the 0xff15/2 child (see orientDescriptor)
+            for(unsigned i=0;i<8;++i)report[2+i]=static_cast<unsigned char>(now>>(8*i));
+        } else {
+            for(unsigned i=1;i<length;++i)report[i]=static_cast<unsigned char>(v>>(8*(i-1)));
+        }
         IOBufferMemoryDescriptor *buffer=IOBufferMemoryDescriptor::withBytes(report,length,kIODirectionNone);
         IOReturn result=buffer?self->handleReport(buffer,0,0):kIOReturnNoMemory;
         OSSafeReleaseNULL(buffer);
@@ -452,6 +528,14 @@ class NativeHidInput : public IOHIDDevice {
             t->setProperty("Built-In",kOSBooleanTrue);
             t->setProperty("DisplayIntegrated",kOSBooleanTrue);
             if(penBits&512){t->setProperty("PrimaryUsagePage",(unsigned long long)0x0d,32);t->setProperty("PrimaryUsage",(unsigned long long)4,32);}
+            // The keyboard-first pencil device (bit 8192) publishes (1,6) from its first collection; backboardd files a digitizer by
+            // the primary pair, so it becomes the pencil pair 0x0D/0x20 (or 0x0D/1 without 4096), as the touch device becomes 0x0D/4.
+            else if(penBits&8192){t->setProperty("PrimaryUsagePage",(unsigned long long)0x0d,32);t->setProperty("PrimaryUsage",(unsigned long long)((penBits&4096)?0x20:1),32);}
+            // backboardd's direct-touch path (donor backboardd 0x10000f0d8) reads this service property once per digitizer and
+            // uses it as the events' BKSHIDEventDigitizerAttributes maximumForce; without it 0, so UIKit's maximumPossibleForce was 0
+            // and PencilKit recorded every point with force -1 (constant-width ink, main5b). Apple's multitouch service publishes it.
+            // The same units as the event pressure after pencil::dispatch's scaling, so a full press is maximumPossibleForce.
+            t->setProperty("AccurateMaxDigitizerPressureValue",(unsigned long long)(pencil::scale>1?pencil::scale:1000),32);
         }
         native_pen_hid[0]=2;
     }
@@ -462,8 +546,8 @@ class NativeHidInput : public IOHIDDevice {
             if(driver && (touchEnabled || touchOnly))edge::install(driver);
             if(driver && accelOnly)stampMotion(driver,3,0x73,native_accel_hid);
             if(driver && gyroOnly)stampMotion(driver,9,0x7a,native_gyro_hid);
-            if(driver && orientOnly)stampBuiltIn(driver,native_orient_hid);
-            if(driver && penOnly)stampPen(driver);
+            if(driver && orientOnly)stampBuiltIn(driver,native_orient_hid,!(sensorBits&256));
+            if(driver && penOnly){stampPen(driver);pencil::install(driver);}
         }
         return eventDriverFound;
     }
@@ -477,10 +561,16 @@ class NativeHidInput : public IOHIDDevice {
     // The device orientation service keeps its Sensor page identity (0x20/0x8a is the pair locationd's CLOrientationNotifier looks up),
     // but locationd's CLIoHidInterface also requires its matching properties, {Built-In = true} for this device (a constant dictionary
     // in the donor locationd). Without it every lookup logged "Service for device with usage pair {32, 138} is not ready" (combo8b).
-    static void stampBuiltIn(IORegistryEntry *driver,volatile uint32_t *stats) {
+    // Keyboard-first (main5): the primary usage comes from the keyboard collection (1/6), so it is stamped to 0x20/0x8a as well;
+    // the device's DeviceUsagePairs list both collections, and locationd's IOHIDServiceClientConformsTo(0x20, 0x8a) reads those.
+    static void stampBuiltIn(IORegistryEntry *driver,volatile uint32_t *stats,bool primary) {
         IORegistryEntry *targets[2]={driver,driver->getParentEntry(gIOServicePlane)};
-        for(IORegistryEntry *t:targets)if(t)t->setProperty("Built-In",kOSBooleanTrue);
-        stats[0]=2;   // 2: event driver found and stamped
+        for(IORegistryEntry *t:targets) {
+            if(!t)continue;
+            t->setProperty("Built-In",kOSBooleanTrue);
+            if(primary){t->setProperty("PrimaryUsagePage",(unsigned long long)0x20,32);t->setProperty("PrimaryUsage",(unsigned long long)0x8a,32);}
+        }
+        stats[0]=(stats[0]&~0xffu)|2;   // 2: event driver found and stamped
     }
     static void stampMotion(IORegistryEntry *driver,unsigned appleUsage,unsigned sensorUsage,volatile uint32_t *stats) {
         OSArray *pairs=OSArray::withCapacity(2);
@@ -500,7 +590,47 @@ class NativeHidInput : public IOHIDDevice {
             if(pairs)t->setProperty("DeviceUsagePairs",pairs);
         }
         OSSafeReleaseNULL(pairs);
-        stats[0]=2;   // 2: event driver found and stamped
+        stats[0]=(stats[0]&~0xffu)|2;   // 2: event driver found and stamped
+    }
+    // Which driver took this device and who opened it, as a [t970 pen log] line once per change of the client count: the driver's
+    // class and registry ID (the sender ID backboardd logs), the usages it publishes, Built-In, DisplayIntegrated, and its user
+    // clients by class. The HID event system opens one per service it takes. The pen device's count also goes to native_pen_hid[0]
+    // bits 8..15; the touch device (the service backboardd does take) writes the same line as the control (combo26: the separate
+    // pencil device had none).
+    unsigned driverClients() {
+        unsigned clients=0;
+        IORegistryEntry *driver=eventDriver(this,4);
+        if(!driver)return 0;
+        if(OSIterator *it=driver->getChildIterator(gIOServicePlane)) {
+            while(it->getNextObject())++clients;
+            it->release();
+        }
+        return clients>0xff?0xff:clients;
+    }
+    void noteDriver(const char *tag,bool penStat) {
+        unsigned clients=0;
+        char names[64]={0};
+        IORegistryEntry *driver=eventDriver(this,4);
+        if(!driver)return;
+        if(OSIterator *it=driver->getChildIterator(gIOServicePlane)) {
+            while(OSObject *child=it->getNextObject()) {
+                IORegistryEntry *e=OSDynamicCast(IORegistryEntry,child);if(!e)continue;
+                if(clients<2){size_t n=strlen(names);snprintf(names+n,sizeof(names)-n,"%s%s",n?",":"",e->getMetaClass()->getClassName());}
+                ++clients;
+            }
+            it->release();
+        }
+        if(penStat)native_pen_hid[0]=(native_pen_hid[0]&0xff)|((clients>0xff?0xff:clients)<<8);
+        if(clients+1!=penNoted && &t970_pen_note) {
+            penNoted=clients+1;
+            OSNumber *page=OSDynamicCast(OSNumber,driver->getProperty("PrimaryUsagePage")),*usage=OSDynamicCast(OSNumber,driver->getProperty("PrimaryUsage"));
+            char line[160];
+            snprintf(line,sizeof line,"%s drv %s id %llx pu %x/%x bi %d di %d cl %u %s t=%us",tag,driver->getMetaClass()->getClassName(),
+                     driver->getRegistryEntryID(),page?page->unsigned32BitValue():0,usage?usage->unsigned32BitValue():0,
+                     driver->getProperty("Built-In")==kOSBooleanTrue,driver->getProperty("DisplayIntegrated")==kOSBooleanTrue,clients,names,penTicks);
+            t970_pen_note(line);
+        }
+        ++penTicks;
     }
     static bool hasEventDriver(IORegistryEntry *parent,unsigned depth) {return eventDriver(parent,depth)!=nullptr;}
     // The IOHIDEventDriver below this device, if one has attached.
@@ -522,21 +652,21 @@ class NativeHidInput : public IOHIDDevice {
             // The separate pen device: how many user clients its event driver has (bits 8..15 of native_pen_hid[0]). The HID event
             // system opens one per service it takes; none means no user-space process ever saw the service (combo24b: backboardd's
             // digitizer matcher never listed it).
-            if(self->penOnly && self->hasEventDriverCached()) {
-                unsigned clients=0;
-                if(IORegistryEntry *driver=eventDriver(self,4)) {
-                    if(OSIterator *it=driver->getChildIterator(gIOServicePlane)) {
-                        while(OSObject *child=it->getNextObject())if(OSDynamicCast(IORegistryEntry,child))++clients;
-                        it->release();
-                    }
-                }
-                native_pen_hid[0]=(native_pen_hid[0]&0xff)|((clients>0xff?0xff:clients)<<8);
+            if(self->penOnly && self->hasEventDriverCached())self->noteDriver("pen",true);
+            // The motion devices: their event driver's user clients in bits 8..15 of stats[0] (0 = the HID event system never opened
+            // the service, which is what the sensor-only shape got). Until the driver appears, look every 50 ms, so the primary usage
+            // stamp lands right after it registers rather than up to a second later.
+            if(!self->penOnly) {
+                volatile uint32_t *stats=self->orientOnly?native_orient_hid:self->gyroOnly?native_gyro_hid:native_accel_hid;
+                if(!self->hasEventDriverCached()){source->setTimeoutMS(50);return;}
+                stats[0]=(stats[0]&0xffu)|(self->driverClients()<<8);
             }
             if(self->hasEventDriverCached() && self->orientOnly && self->lastOrient && !self->orientDelivered)
                 accelAction(self,reinterpret_cast<void *>(uintptr_t(self->lastOrient)),nullptr,nullptr,nullptr);
             source->setTimeoutMS(1000);return;
         }
         native_hid_live_checkpoint(self);
+        if(self->penBits && (self->touchEnabled||self->touchOnly) && hasEventDriver(self,4))self->noteDriver("touch",false);
         if(self->touchOnly){source->setTimeoutMS(1000);return;}
         if(!self->down && !hasEventDriver(self,4)) {
             native_hid_input_observed(3,0);
@@ -562,7 +692,7 @@ public:
     void setGyroOnly() {gyroOnly=true;}
     void setPenOnly() {penOnly=true;}
     IOWorkLoop *getWorkLoop() const override {return inputLoop;}
-    OSString *newTransportString() const override {return OSString::withCString(touchOnly?"SPI":(accelOnly||orientOnly||gyroOnly)?"SPU":penOnly?"I2C":"Virtual");}
+    OSString *newTransportString() const override {return OSString::withCString(touchOnly?"SPI":(accelOnly||orientOnly||gyroOnly)?"SPU":(penOnly && !(penBits&8192))?"I2C":"Virtual");}
     OSString *newProductString() const override {return OSString::withCString(touchOnly?"Offline touch digitizer":accelOnly?"Accelerometer":orientOnly?"Device orientation":gyroOnly?"Gyro":penOnly?"Stylus digitizer":"Offline HID input probe");}
     IOReturn newReportDescriptor(IOMemoryDescriptor **out) const override {
         if(!out)return kIOReturnBadArgument;
@@ -578,16 +708,37 @@ public:
             // application collection is Stylus (0x20), so the service's primary usage is the pencil pair from the start. The Stylus
             // physical collection inside still makes the transducer (IOHIDEventDriver walks up to the first digitizer collection).
             if(penBits&4096)pen[3]=0x20;
+            // Bit 8192: the keyboard collection first, as the combined touch device has it (combo26: the 0x0D-only pencil device's
+            // event driver never got a user client, while the keyboard-first touch device's does); its PrimaryUsage is stamped to
+            // 0x0D/0x20 (stampPen) the way native_hid_live_checkpoint stamps the touch device to 0x0D/4.
+            if(penBits&8192) {
+                unsigned char both[sizeof(descriptor)+sizeof(penDescriptor)];
+                memcpy(both,descriptor,sizeof(descriptor));memcpy(both+sizeof(descriptor),pen,sizeof pen);
+                *out=IOBufferMemoryDescriptor::withBytes(both,sizeof both,kIODirectionNone);return *out?kIOReturnSuccess:kIOReturnNoMemory;
+            }
             *out=IOBufferMemoryDescriptor::withBytes(pen,sizeof pen,kIODirectionNone);return *out?kIOReturnSuccess:kIOReturnNoMemory;
         }
-        if(accelOnly){*out=IOBufferMemoryDescriptor::withBytes(accelDescriptor,sizeof(accelDescriptor),kIODirectionNone);return *out?kIOReturnSuccess:kIOReturnNoMemory;}
-        if(gyroOnly){*out=IOBufferMemoryDescriptor::withBytes(gyroDescriptor,sizeof(gyroDescriptor),kIODirectionNone);return *out?kIOReturnSuccess:kIOReturnNoMemory;}
-        if(orientOnly){*out=IOBufferMemoryDescriptor::withBytes(orientDescriptor,sizeof(orientDescriptor),kIODirectionNone);return *out?kIOReturnSuccess:kIOReturnNoMemory;}
+        // The motion devices: the keyboard collection first (reports 1 and 2, never sent), then the motion collection. The S Pen work
+        // (combo26) found that the user-space HID event system opens a separate device's service only in this shape: the 0x0D-only
+        // pencil device's event driver never got a user client, the keyboard-first one did. The sensor-only devices behaved the same
+        // way: locationd logged "Service for device with usage pair {32, 138} is not ready" in every boot (combo8b..11a), whatever was
+        // stamped. The keyboard personality takes the device and IOHIDEventDriver still parses the motion elements of the whole
+        // descriptor; the primary usage (1/6 from the first collection) is stamped to the motion pair when the driver appears.
+        // t970-sensors bit 256: the sensor-only descriptor as before.
+        if(accelOnly||gyroOnly||orientOnly) {
+            const unsigned char *motion=accelOnly?accelDescriptor:gyroOnly?gyroDescriptor:orientDescriptor;
+            const size_t motionSize=accelOnly?sizeof(accelDescriptor):gyroOnly?sizeof(gyroDescriptor):sizeof(orientDescriptor);
+            if(sensorBits&256){*out=IOBufferMemoryDescriptor::withBytes(motion,motionSize,kIODirectionNone);return *out?kIOReturnSuccess:kIOReturnNoMemory;}
+            unsigned char both[sizeof(descriptor)+sizeof(accelDescriptor)+sizeof(gyroDescriptor)+sizeof(orientDescriptor)];
+            memcpy(both,descriptor,sizeof(descriptor));memcpy(both+sizeof(descriptor),motion,motionSize);
+            *out=IOBufferMemoryDescriptor::withBytes(both,sizeof(descriptor)+motionSize,kIODirectionNone);
+            return *out?kIOReturnSuccess:kIOReturnNoMemory;
+        }
         if(touchOnly){size=sizeof(touchDescriptor);memcpy(combined,touchDescriptor,size);}
         else{
             size=sizeof(descriptor);memcpy(combined,descriptor,size);
             // Default: one device, keyboard collection first, digitizer second (the arrangement whose event driver
-            // and user client attach on hardware); the separate digitizer device is the opt-in sheng-touch-split.
+            // and user client attach on hardware); the separate digitizer device is the opt-in touch-split.
             if(touchEnabled){memcpy(combined+size,touchDescriptor,sizeof(touchDescriptor));size+=sizeof(touchDescriptor);}
         }
         // The S Pen's stylus collection goes inside the Touch Screen application collection, before its closing 0xc0.
@@ -605,17 +756,18 @@ public:
         // keyboard. This is a matching property, not a client entitlement.
         if(!setProperty("HIDDefaultBehavior",true))return false;
         unsigned touch=0;
-        touchEnabled=PE_parse_boot_argn("sheng-touch-hid",&touch,sizeof(touch)) && touch==1;
-        // gts7xlwifi: with sheng-touch-split=1 the digitizer is only the separate touch-only device. The combined device keeps
+        touchEnabled=PE_parse_boot_argn("touch-hid",&touch,sizeof(touch)) && touch==1;
+        // gts7xlwifi: with touch-split=1 the digitizer is only the separate touch-only device. The combined device keeps
         // the keyboard and buttons and declares no second, dead Touch Screen the window server could bind to instead.
         unsigned split=0;
-        if(!touchOnly && PE_parse_boot_argn("sheng-touch-split",&split,sizeof(split)) && split==1)touchEnabled=false;
+        if(!touchOnly && PE_parse_boot_argn("touch-split",&split,sizeof(split)) && split==1)touchEnabled=false;
         if(accelOnly||orientOnly||gyroOnly||penOnly)touchEnabled=false;
         // The pen device is Built-In and DisplayIntegrated from the start (the interface copies them when it starts, as for the motion
         // devices). Both dispatch as a collection with the transducer as its child, as the touch screen and as an iPad's own digitizer
         // sends the Pencil; t970-pen bit 1024 sends the stylus event on its own instead.
         if(penOnly){
             PE_parse_boot_argn("t970-pen",&penBits,sizeof(penBits));
+            {unsigned force=0;if(PE_parse_boot_argn("t970-pen-force",&force,sizeof(force)))pencil::scale=(int32_t)(force>30000?30000:force);}
             setProperty("Built-In",true);setProperty("DisplayIntegrated",true);
             if((penBits&8) || !(penBits&1024))setProperty("DigitizerCollectionDispatch",true);
         }
@@ -628,8 +780,9 @@ public:
         // IOHIDDevice::start, which asks for the report descriptor.
         if(touchOnly||touchEnabled) {
             unsigned bits=0;
-            if(PE_parse_boot_argn("t970-pen",&bits,sizeof(bits)) && (bits&4) && !(bits&2048) && &native_pen_set_sink) {
-                penBits=bits;penMerged=true;penAsFinger=(bits&8)!=0;
+            if(PE_parse_boot_argn("t970-pen",&bits,sizeof(bits)) && (bits&4)) {
+                penBits=bits;   // also turns on the touch device's driver line (noteDriver), the control for the pen device
+                if(!(bits&2048) && &native_pen_set_sink){penMerged=true;penAsFinger=(bits&8)!=0;}
             }
         }
         // The motion devices are Built-In from the start: IOHIDInterface copies Built-In from the device and IOHIDEventService from the
@@ -637,6 +790,7 @@ public:
         // service once, when the new-service notification arrives; the later stamp (stampBuiltIn/stampMotion, ~1 s after) came too late
         // and {32, 138} stayed "not ready" for the whole of combo9.
         if(accelOnly||orientOnly||gyroOnly)setProperty("Built-In",true);
+        if(accelOnly||orientOnly||gyroOnly)PE_parse_boot_argn("t970-sensors",&sensorBits,sizeof(sensorBits));
         if(!IOHIDDevice::start(provider))return false;
         timer=IOTimerEventSource::timerEventSource(this,tick);
         if(!timer || inputLoop->addEventSource(timer)!=kIOReturnSuccess) {

@@ -40,7 +40,7 @@ extern "C" bool native_legacy_prepare_scanout(void);
 extern "C" void native_legacy_transfer_observed(IOReturn,const void *,uint64_t);
 extern "C" void native_legacy_copy_timing_observed(uint64_t ticks,uint64_t bytes);
 extern "C" void native_legacy_retirement_observed(IOService *);
-// GPU hand-off (boot-arg sheng-fb-gpu=1): the frame is offered to the privileged GPU client instead of being copied; the swap retires when the
+// GPU hand-off (boot-arg fb-gpu=1): the frame is offered to the privileged GPU client instead of being copied; the swap retires when the
 // client reports the GPU copy done (native_legacy_gpu_complete). A refused offer or a failed copy uses the CPU copy below and is counted.
 // format: NGP_BGRX8888, or for a half-float surface NGP_RGBA16F_LINEAR / NGP_RGBA16F_ENCODED (the client converts it on the GPU).
 extern "C" bool native_legacy_gpu_offer(void *display,IOMemoryDescriptor *,uint64_t stride,uint32_t width,uint32_t height,uint32_t format);
@@ -54,7 +54,7 @@ extern "C" {volatile uint32_t native_t970_direct[11];}
 // gts7xlwifi: the formats the compositor swapped: [0] the last format (fourcc), [1] 'b3a8' XR10 frames, [2] half-float, [3] four-byte,
 // [4] GPU offers refused. next2/next3 never offered a frame to the GPU copy, and only the format tells which path a frame could take.
 extern "C" {volatile uint32_t native_t970_swapfmt[5];}
-// Direct scanout (sheng-dpu-scanout=2): the display's two pipes fetch the compositor's surface through the display bank's window
+// Direct scanout (dpu-scanout=2): the display's two pipes fetch the compositor's surface through the display bank's window
 // (NativeUfs native_ufs_dpu_map). [0] flips, [1] surfaces mapped, [2] map failures, [3] latches that took over 50 ms, [4] longest latch (us),
 // [5] latch total (us, for the mean), [6] surfaces let go, [7] swaps that fell back to the copy, [8] flips back to the boot memory,
 // [9] swaps held back until the GPU had written the frame (the compositor submits the swap when the command buffer is scheduled), [10] total
@@ -98,16 +98,16 @@ extern "C" void native_legacy_gpu_fallback_observed(int status);
 extern "C" {volatile uint64_t native_legacy_early_retires,native_legacy_early_failures;}
 // Swaps the family gave up on after waiting 5 s for them (cancelSwapsAfterTimeout).
 extern "C" {volatile uint64_t native_legacy_swap_timeouts;}
-// Display refresh tick (boot-arg sheng-vsync=<Hz>, 0 or absent: off). The original family sends the compositor's vsync message (type 5)
+// Display refresh tick (boot-arg vsync=<Hz>, 0 or absent: off). The original family sends the compositor's vsync message (type 5)
 // through native_legacy_vsync_notify, the unchanged original sender, but only a platform subclass calls it from the panel's vblank and
 // that subclass is not part of this port: without it the render server never saw a vsync. The GOP scanout has no vblank interrupt, so a
 // work-loop timer stands in for it while at least one client has vsync notifications enabled. Events: 0 armed, 1 sent, 2 idle (no client),
 // 3 late (deadline passed, cadence restarted), 4 started, 5 refresh properties reported at that rate.
 extern "C" void native_legacy_vsync_notify(void *display,uint64_t timestamp,uint64_t continuousTime,uint64_t interval);
 // The panel's refresh rate in Hz for the tick and the refresh properties below (0: none, the render server's own 1/60 s). By default
-// boot-arg sheng-vsync; a platform may answer otherwise (its display device's mode).
+// boot-arg vsync; a platform may answer otherwise (its display device's mode).
 extern "C" __attribute__((weak)) unsigned native_legacy_refresh_hz(void) {
-    unsigned hz=0;PE_parse_boot_argn("sheng-vsync",&hz,sizeof(hz));return hz;
+    unsigned hz=0;PE_parse_boot_argn("vsync",&hz,sizeof(hz));return hz;
 }
 // The unchanged original setDisplayRefreshProperties: publishes IOMFBDisplayRefresh from slot 301 (getRefreshAttributes below).
 extern "C" bool native_legacy_set_refresh_properties(void *display);
@@ -136,7 +136,7 @@ static uint8_t *halfTable() {
     if(table)return table;
     uint8_t *made=static_cast<uint8_t *>(IOMalloc(32768));
     if(!made)return nullptr;
-    unsigned mode=1;PE_parse_boot_argn("sheng-fb-half",&mode,sizeof(mode));
+    unsigned mode=1;PE_parse_boot_argn("fb-half",&mode,sizeof(mode));
     const uint16_t *thresholds=mode==2?native_half::kEncoded:native_half::kLinear;
     unsigned code=0;
     for(unsigned bits=0;bits<32768;++bits) {
@@ -261,13 +261,13 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
     uint64_t gpuTraceRequest=0;
     uint64_t gpuLength=0;
     bool gpuBypass=false;
-    // The swap of the frame the GPU client is copying already retired (boot-arg sheng-early-retire, default 1). Retiring the offered
+    // The swap of the frame the GPU client is copying already retired (boot-arg early-retire, default 1). Retiring the offered
     // swap releases the frame shown before it, whose copy has finished (transferred held this one back); the offered frame itself stays
     // in use until the next swap retires, so the compositor never writes a frame the GPU is still reading.
     bool gpuRetired=false;
-    // How a half-float surface is encoded (boot-arg sheng-fb-half=2: values already sRGB-encoded), as the GPU client converts it.
+    // How a half-float surface is encoded (boot-arg fb-half=2: values already sRGB-encoded), as the GPU client converts it.
     static uint32_t halfOfferFormat() {
-        unsigned mode=1;PE_parse_boot_argn("sheng-fb-half",&mode,sizeof(mode));
+        unsigned mode=1;PE_parse_boot_argn("fb-half",&mode,sizeof(mode));
         return mode==2?NGP_RGBA16F_ENCODED:NGP_RGBA16F_LINEAR;
     }
     // The refresh tick runs on the family's work loop, the loop of the command gate that registers and removes the vsync clients, so the
@@ -307,7 +307,7 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
     static constexpr uint32_t kT970Flush[kT970Pipes]={1u<<0,1u<<1,1u<<2,1u<<18,1u<<11,1u<<12,1u<<24,1u<<25};
     uint32_t livePipe[kT970MaxLive]={},liveOffset[kT970MaxLive]={},livePipes=0,ctlFlush=0,flushMask=0,bootIova=0,bootStride=0;
     void startDirect() {
-        unsigned mode=0;PE_parse_boot_argn("sheng-dpu-scanout",&mode,sizeof(mode));
+        unsigned mode=0;PE_parse_boot_argn("dpu-scanout",&mode,sizeof(mode));
         native_t970_direct[10]=&native_ufs_dpu_state?native_ufs_dpu_state:0;
         if(mode<2 || !&native_ufs_dpu_map || !&native_ufs_dpu_state || !(native_ufs_dpu_state>>31) || !primary || !bootMapping)
             {native_t970_direct[0]=2;return;}
@@ -606,22 +606,22 @@ public:
         unsigned enabled=0;PE_parse_boot_argn("offline-legacy-register",&enabled,sizeof(enabled));
         if(enabled!=1)native_legacy_backend_guard(84,this,__builtin_return_address(0));
         // Nothing in the family publishes IOMFBDisplayRefresh (its platform subclass does), and without it the render server keeps its own
-        // 1/60 s heartbeat (int-210: refresh=0). Publish it before any client can find the display, only when sheng-vsync asks for more.
+        // 1/60 s heartbeat (int-210: refresh=0). Publish it before any client can find the display, only when vsync asks for more.
         unsigned hz=native_legacy_refresh_hz();
         if(primary && hz>60 && hz<=240)native_legacy_set_refresh_properties(this);
         IOService::registerService(options);native_legacy_registration_observed(this);
     }
     bool isMainDisplay() override {return primary;}
     // The render server paces its display timer by the minimum refresh interval in IOMFBDisplayRefresh (int-209: no vsync client ever
-    // registered, frames came every 16.7 ms), and the generic slot 301 fixes it at 1/60 s. With sheng-vsync=<Hz> it reports the panel's
+    // registered, frames came every 16.7 ms), and the generic slot 301 fixes it at 1/60 s. With vsync=<Hz> it reports the panel's
     // own rate instead; the maximum interval and the step keep the original values. Words in 32.32 seconds, then their mach times.
-    // The original maximum interval is 1/24 s (int-240), which offers the render server a 24 to sheng-vsync Hz range. The panel has no
-    // variable refresh, so sheng-vsync-fixed=1 reports the maximum interval equal to the minimum: one fixed rate.
+    // The original maximum interval is 1/24 s (int-240), which offers the render server a 24 to vsync Hz range. The panel has no
+    // variable refresh, so vsync-fixed=1 reports the maximum interval equal to the minimum: one fixed rate.
     bool getRefreshAttributes(uint64_t *words,bool fixed) override {
         if(!IOMobileFramebufferLegacy::getRefreshAttributes(words,fixed) || !words)return false;
         unsigned hz=native_legacy_refresh_hz();
         if(hz<=60 || hz>240)return true;
-        unsigned locked=0;PE_parse_boot_argn("sheng-vsync-fixed",&locked,sizeof(locked));
+        unsigned locked=0;PE_parse_boot_argn("vsync-fixed",&locked,sizeof(locked));
         const uint64_t interval=(1ull<<32)/hz;
         uint64_t machTime=0;nanoseconds_to_absolutetime(interval*1000000000ull>>32,&machTime);
         words[0]=interval;words[1]=machTime;
@@ -749,7 +749,7 @@ public:
             // copy (int-243: about 4.4 ms render then about 3 ms copy per frame). Retire now: the presenter holds its own reference to this
             // frame's memory, the previous frame's copy has finished (transferred held this one back), and the next swap still waits for
             // the copy because transferred stays set until finishGpuSwap.
-            unsigned early=1;PE_parse_boot_argn("sheng-early-retire",&early,sizeof(early));
+            unsigned early=1;PE_parse_boot_argn("early-retire",&early,sizeof(early));
             if(early==1 && retireSwap(request,true)) {
                 gpuRetired=true;native_legacy_early_retires=native_legacy_early_retires+1;
             }
@@ -803,11 +803,11 @@ public:
         {
             // Store only what changed since the previous frame (the scanout memory is slow device memory).
             uint64_t need=(uint64_t)width*height*4;
-            // Differential copy is opt-in (sheng-fb-diff=1): on hardware it reads the whole source every frame and was not faster
+            // Differential copy is opt-in (fb-diff=1): on hardware it reads the whole source every frame and was not faster
             // than the plain copy (143-285 ms per swap either way), and the first boots with it were followed by an unresponsive
             // lock screen that disappeared with the plain copy (int-005).
             static int diffOff=-1;
-            if(diffOff<0){unsigned v=0;PE_parse_boot_argn("sheng-fb-diff",&v,sizeof v);diffOff=(v!=1);}
+            if(diffOff<0){unsigned v=0;PE_parse_boot_argn("fb-diff",&v,sizeof v);diffOff=(v!=1);}
             if(!diffOff && !shadow && need<=(64ull<<20)){shadow=IOMallocAligned((vm_size_t)need,16384);if(shadow){shadowBytes=need;shadowValid=false;}}
             if(!diffOff && shadow && shadowBytes>=need)
                 stored=native_legacy_copy_diff(reinterpret_cast<volatile void *>(bootMapping->getVirtualAddress()),

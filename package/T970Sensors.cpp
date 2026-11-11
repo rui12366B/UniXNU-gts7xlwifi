@@ -23,8 +23,11 @@
 // t970-sensors=<bits>:
 //   low nibble (level): 1 survey only (reads), 2 boot the SLPI and GLINK, 3 + QRTR (HELLO, servers), 4 + sensor client (accel stream)
 //   16  publish the accelerometer HID device (HidInputProbe.cpp)
-//   32  synthetic gravity instead of the SLPI (tests the iPadOS hookup): t970-sensors-fake=0 cycles portrait, landscape left, upside
-//       down, landscape right every 8 s; 1..4 holds one of them
+//   32  synthetic gravity instead of the SLPI (tests the iPadOS hookup): holds portrait unless bit 512 or t970-sensors-fake says
+//       otherwise (t970-sensors-fake=1..4 holds portrait, landscape left, upside down or landscape right; 0 cycles them every 8 s)
+//   64  keep locationd out of the `lite` disabled jobs (BootWatchdogPolicy.c); 128 persist locationd's motion debug log (same file)
+//   256 the motion HID devices without the keyboard collection (NativeHidInput.cpp; the shape before main4, never opened)
+//   512 synthetic gravity cycles the four orientations (bit 32)
 // t970-sensors-fw=DIR (default /private/var/ngpu/firmware/slpi), t970-sensors-hz (default 25), t970-sensors-axes (see axes()).
 // The ADSP: with t970-adsp >= 2 it owns the IPCC interrupt and the AOSS mailbox. Then this driver waits for its ready stage, gets its
 // doorbells through t970_ipcc_forward (called from T970Adsp's interrupt handler, if that hook is there; it polls every 20 ms anyway)
@@ -88,7 +91,7 @@ constexpr uint32_t kSpiIpcc = 229, kClientSlpi = 4;
 constexpr uint32_t kFatal = 1u << 0, kReady = 1u << 1, kHandover = 1u << 2;
 constexpr uint32_t kEvSmp2p = 1, kEvGlink = 2, kEvAop = 4;
 constexpr uint32_t kPortSuid = 0x4001, kPortAccel = 0x4002;
-constexpr uint32_t kIntentSize = 0x4400, kIntentCount = 6, kTxSlots = 8, kTxBytes = 1280;
+constexpr uint32_t kIntentSize = 0x4400, kIntentCount = 6, kTxSlots = 16, kTxBytes = 1280;
 
 struct Window {IOMemoryMap *map; volatile uint8_t *va;};
 bool mapWindow(Window &w, uint64_t base, uint64_t size, IOOptionBits cache = kIOMapInhibitCache) {
@@ -391,11 +394,29 @@ bool sendSns(uint32_t port, T970Suid suid, uint32_t msg_id, const uint8_t *paylo
                                         (uint32_t)q) : 0;
     return p && queue(packet, p);
 }
+// The SUID survey: one lookup per data type, so the boot log shows what the hub offers (main7b: the "accel" lookup was acknowledged,
+// SSC result 0, and nothing else came; without its registry, which Android serves over FastRPC, the hub may instantiate no physical
+// sensor). "registry" is the SSC registry sensor: if it is there, its configuration might be written over QMI instead of FastRPC.
+const char *const kSurvey[] = {"accel", "gyro", "mag", "ambient_light", "registry", "device_orient", "proximity", "pressure"};
+extern "C" {
+// [0] QMI responses, [1] report indications, [2] events, [3] last event msg id, [4] SUID events, [5] last SSC result, [6] other QMI
+// messages, [7] lookups sent
+volatile int32_t t970_ssc[8];
+char t970_ssc_text[200];   // "type:count" per SUID event, in arrival order
+}
+void sscNote(const char *type, int n) {
+    const size_t at = strnlen(t970_ssc_text, sizeof t970_ssc_text);
+    if (at < sizeof t970_ssc_text - 1) snprintf(t970_ssc_text + at, sizeof t970_ssc_text - at, "%s%s:%d", at ? " " : "", type, n);
+}
 void askSuid() {
-    uint8_t payload[64];
-    const size_t n = t970_sns_suid_req(payload, sizeof payload, "accel", 1, 1);
     const T970Suid suidSensor = {T970_SUID_SENSOR_LOW, T970_SUID_SENSOR_HIGH};
-    if (n && sendSns(kPortSuid, suidSensor, T970_SNS_SUID_REQ, payload, n)) {gClientState = 1; usbLog("[sensors] suid lookup accel sent");}
+    for (const char *type : kSurvey) {
+        uint8_t payload[64];
+        const size_t n = t970_sns_suid_req(payload, sizeof payload, type, 1, 1);
+        if (n && sendSns(kPortSuid, suidSensor, T970_SNS_SUID_REQ, payload, n)) t970_ssc[7] = t970_ssc[7] + 1;
+    }
+    gClientState = 1;
+    usbLog("[sensors] suid survey sent (%d lookups)", (int)t970_ssc[7]);
 }
 void configure() {
     uint8_t payload[16];
@@ -457,7 +478,9 @@ void feed(int32_t xMilliG, int32_t yMilliG, int32_t zMilliG) {
     void (*gyro)(void *, uint64_t) = gGyroSink;
     if (gyro) gyro(gGyroContext, 0);
 }
+volatile bool gRealSamples;   // set by the first hub sample: the synthetic source (bit 32) then stops feeding
 void sample(const int32_t raw[3], int32_t status) {
+    gRealSamples = true;
     const uint32_t axes = gAxes ? gAxes : 0x1ac;
     int32_t out[3];
     for (unsigned i = 0; i < 3; ++i) {
@@ -477,10 +500,14 @@ void sample(const int32_t raw[3], int32_t status) {
 }
 
 void onEvent(void *, T970Suid suid, uint32_t msg_id, uint64_t, const uint8_t *payload, size_t length) {
+    t970_ssc[2] = t970_ssc[2] + 1;
+    t970_ssc[3] = (int32_t)msg_id;
     if (msg_id == T970_SNS_SUID_EVENT) {
         char type[24];
         T970Suid found[4];
         const int n = t970_sns_suid_event(payload, length, type, sizeof type, found, 4);
+        t970_ssc[4] = t970_ssc[4] + 1;
+        sscNote(type, n);
         usbLog("[sensors] suid event '%s' n=%d", type, n);
         if (n > 0 && !strcmp(type, "accel") && gClientState < 2) {
             gAccel = found[0];
@@ -520,7 +547,9 @@ void onData(const T970QrtrPacket &p) {
     if (t970_qmi_parse(p.payload, p.size, &m)) return;
     if (m.type == T970_QMI_RESPONSE && m.msg == T970_SNS_CLIENT_REQ) {
         uint16_t result = 0, error = 0; uint64_t client = 0; int32_t sns = -1;
+        t970_ssc[0] = t970_ssc[0] + 1;
         if (!t970_sns_qmi_response(&m, &result, &error, &client, &sns)) {
+            t970_ssc[5] = sns;
             t970_sensors[15] = result || error ? (int32_t)((uint32_t)result << 16 | error) : (int32_t)(0x10000000u | (uint32_t)(sns & 0xffff));
             usbLog("[sensors] response port %x qmi %u/%u client %llx sns %d", (unsigned)p.dst_port, result, error,
                    (unsigned long long)client, (int)sns);
@@ -529,8 +558,12 @@ void onData(const T970QrtrPacket &p) {
     }
     if (m.type == T970_QMI_INDICATION && (m.msg == T970_SNS_CLIENT_REPORT_IND || m.msg == T970_SNS_CLIENT_JUMBO_REPORT_IND)) {
         uint64_t client = 0; const uint8_t *event = nullptr; uint16_t length = 0;
+        t970_ssc[1] = t970_ssc[1] + 1;
         if (!t970_sns_qmi_report(&m, &client, &event, &length)) t970_sns_events(event, length, onEvent, nullptr);
+        return;
     }
+    t970_ssc[6] = t970_ssc[6] + 1;   // anything else on our ports (type << 16 | msg id of the last one in the USB log)
+    usbLog("[sensors] other qmi type %u msg %x len %u", (unsigned)m.type, (unsigned)m.msg, (unsigned)m.tlv_length);
 }
 
 void routerReceive(void *, QcomGlinkChannel *, const uint8_t *data, uint32_t length) {
@@ -647,7 +680,12 @@ bool attachIrqs() {
 bool loadState() {
     const char *text = "{class: image, res: load_state, name: slpi, val: on}";
     if (!gOwnQmp) {
-        const int rc = t970_adsp_qmp_send(text);
+        int rc = -1;
+        for (unsigned tries = 0; tries < 20; ++tries) {   // -1 not serving yet, -2 another send in flight: retry for ~5 s
+            rc = t970_adsp_qmp_send(text);
+            if (rc != -1 && rc != -2) break;
+            IOSleep(250);
+        }
         t970_sensors[5] = rc;
         if (rc) {fail(StLoadState, rc); return false;}
         return true;
@@ -737,14 +775,22 @@ bool startGlink() {
 }
 
 // ---- synthetic gravity (t970-sensors bit 32) ----
+// Holds portrait by default: main5 showed the cycle rotating the UI within ~60 s, and the first 90 degree turn reset the tablet (a
+// display re-layout problem being fixed on the GPU side), so a normal boot must not turn. t970-sensors bit 512 runs the 8 s cycle
+// (portrait, landscape left, upside down, landscape right); t970-sensors-fake=1..4 holds one of those four (1 portrait).
 void fakeLoop() {
-    unsigned fixed = 0;
-    PE_parse_boot_argn("t970-sensors-fake", &fixed, sizeof fixed);
+    unsigned mode = 0, fixed = 0;
+    PE_parse_boot_argn("t970-sensors", &mode, sizeof mode);
+    if (!PE_parse_boot_argn("t970-sensors-fake", &fixed, sizeof fixed)) fixed = (mode & 512) ? 0 : 1;
     static const int32_t vectors[4][3] = {{0, -1000, 0}, {-1000, 0, 0}, {0, 1000, 0}, {1000, 0, 0}};
     static const char *const names[4] = {"portrait", "landscape left", "upside down", "landscape right"};
-    stage(StFake);
+    // Alone (no SLPI level) it owns the stage and the note; next to the SLPI path (stage 2: t970-sensors=243) it leaves both to the
+    // hub's bring-up and only feeds the HID devices, until the hub's first real sample.
+    const bool alone = !(mode & 0xf);
+    if (alone) stage(StFake);
     unsigned last = 99;
     for (uint64_t tick = 0;; ++tick) {
+        if (gRealSamples) {IOSleep(1000); continue;}
         const unsigned which = fixed >= 1 && fixed <= 4 ? fixed - 1 : (unsigned)((tick / 80) % 4);  // 10 Hz, 8 s each
         const int32_t *v = vectors[which];
         // a little noise, so nothing downstream treats the stream as stuck
@@ -752,7 +798,7 @@ void fakeLoop() {
         t970_accel[0] = t970_accel[0] + 1;
         t970_accel[1] = v[0] + jitter; t970_accel[2] = v[1] - jitter; t970_accel[3] = v[2] + jitter;
         feed(v[0] + jitter, v[1] - jitter, v[2] + jitter);
-        if (which != last) {last = which; note("fake: ", names[which]); usbLog("[sensors] fake gravity: %s", names[which]);}
+        if (which != last) {last = which; if (alone) note("fake: ", names[which]); usbLog("[sensors] fake gravity: %s", names[which]);}
         IOSleep(100);
     }
 }
@@ -766,7 +812,15 @@ void sensorsThread(void *, wait_result_t) {
     PE_parse_boot_argn("t970-sensors-axes", &gAxes, sizeof gAxes);
     if (!gHz || gHz > 400) gHz = 25;
     gLevel = mode & 0xf;
-    if (mode & 32) {fakeLoop(); return;}
+    if ((mode & 32) && !gLevel) {fakeLoop(); return;}
+    if (mode & 32) {
+        // Synthetic gravity on a thread of its own, so the SLPI bring-up below still runs (stage 2 keeps the UI on the held
+        // orientation while the hub is tested).
+        thread_t fake = nullptr;
+        if (kernel_thread_start([](void *, wait_result_t) {thread_set_thread_name(current_thread(), "t970-sensors-fake"); fakeLoop();},
+                                nullptr, &fake) == KERN_SUCCESS)
+            thread_deallocate(fake);
+    }
     if (!gLevel) return;
     if (!mapWindow(gSmemW, kSmem, kSmemSize) || !mapWindow(gMutex, kMutex, 0x1000) || !mapWindow(gIpcc, kIpcc, 0x1000) ||
         !mapWindow(gAoss, kAoss, 0x1000)) {
@@ -783,8 +837,9 @@ void sensorsThread(void *, wait_result_t) {
         // The ADSP driver owns the doorbell interrupt and the AOP mailbox: wait until its DSP is up and holds its own rail votes.
         uint64_t deadline;
         clock_interval_to_deadline(180, kSecondScale, &deadline);
-        while (native_adsp_stats[0] >= 0 && native_adsp_stats[0] < 11 && mach_absolute_time() < deadline) IOSleep(250);
-        if (native_adsp_stats[0] < 11) {fail(StDoorbells, -11); return;}
+        // Stage 12 (GLINK up): T970Adsp serves t970_adsp_qmp_send only from its main loop, which it enters after GLINK starts.
+        while (native_adsp_stats[0] >= 0 && native_adsp_stats[0] < 12 && mach_absolute_time() < deadline) IOSleep(250);
+        if (native_adsp_stats[0] < 12) {fail(StDoorbells, -11); return;}
     }
     gTx = static_cast<Tx *>(IOMallocData(sizeof(Tx) * kTxSlots));
     gRouterStorage = static_cast<uint8_t *>(IOMallocData((vm_size_t)kIntentSize * kIntentCount));

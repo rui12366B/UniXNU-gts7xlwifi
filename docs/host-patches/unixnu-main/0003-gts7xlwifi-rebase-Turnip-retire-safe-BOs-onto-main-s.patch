@@ -1,0 +1,114 @@
+From 6c8b8ffb4ebc9f828b87ae9d04409f017bfe401d Mon Sep 17 00:00:00 2001
+From: gts7xlwifi port <gts7xlwifi@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 18:41:43 +0000
+Subject: [PATCH 3/3] gts7xlwifi: rebase Turnip retire-safe BOs onto main;
+ self-bind leaves classic-bind images alone
+
+---
+ .../mesa/turnip-darwin-bo-retire-safe.patch   | 24 +++++++++----------
+ scripts/macho-self-bind-weak-imports.py       |  5 +++-
+ 2 files changed, 16 insertions(+), 13 deletions(-)
+
+diff --git a/patches/mesa/turnip-darwin-bo-retire-safe.patch b/patches/mesa/turnip-darwin-bo-retire-safe.patch
+index 27ff6d4..3ba6280 100644
+--- a/patches/mesa/turnip-darwin-bo-retire-safe.patch
++++ b/patches/mesa/turnip-darwin-bo-retire-safe.patch
+@@ -1,5 +1,5 @@
+ diff --git a/src/freedreno/vulkan/tu_knl_darwin.cc b/src/freedreno/vulkan/tu_knl_darwin.cc
+-index f5de114..b9917d1 100644
++index 6d0e82a..98844f5 100644
+ --- a/src/freedreno/vulkan/tu_knl_darwin.cc
+ +++ b/src/freedreno/vulkan/tu_knl_darwin.cc
+ @@ -11,6 +11,7 @@
+@@ -102,7 +102,7 @@ index f5de114..b9917d1 100644
+  };
+  
+  /* A freed BO whose fence completed stays whole (kernel handle, GPU mapping, CPU lease) in a size-class cache and is handed to the next
+-@@ -749,7 +826,18 @@ darwin_reap_locked(struct tu_device *dev, struct darwin_retire_state *retire)
++@@ -764,7 +841,18 @@ darwin_reap_locked(struct tu_device *dev, struct darwin_retire_state *retire)
+     for (unsigned i = 0; i < total; ++i) {
+        struct darwin_retired_bo *bo = &retire->entries[(retire->head + i) % retire->capacity];
+        bool ready = true;
+@@ -122,7 +122,7 @@ index f5de114..b9917d1 100644
+           if (have_pending_fence && bo->fence == pending_fence) {
+              ready = false;
+           } else if (!have_completed_fence || bo->fence != completed_fence) {
+-@@ -1127,12 +1215,15 @@ darwin_bo_finish(struct tu_device *dev, struct tu_bo *bo)
++@@ -1142,12 +1230,15 @@ darwin_bo_finish(struct tu_device *dev, struct tu_bo *bo)
+        }
+     }
+     if (retire->count < retire->capacity) {
+@@ -140,10 +140,10 @@ index f5de114..b9917d1 100644
+        ++retire->count;
+        ++retire->enqueued;
+        darwin_reap_locked(dev, retire);
+-@@ -1153,8 +1244,19 @@ darwin_bo_finish(struct tu_device *dev, struct tu_bo *bo)
+- 
++@@ -1169,8 +1260,19 @@ darwin_bo_finish(struct tu_device *dev, struct tu_bo *bo)
+  struct tu_darwin_queue_submit {
+     struct util_dynarray commands; /* NativeAdrenoAbiSubmitBuffer */
++    struct util_dynarray starts;   /* uint32_t: the index in commands where a command buffer that sets up its own state begins */
+ +   /* t970-bo-safe: entries whose BO was already freed when the submission was built (darwin_bo_finish zeroes the struct), and the
+ +    * first such BO's kernel handle. */
+ +   unsigned stale;
+@@ -157,10 +157,10 @@ index f5de114..b9917d1 100644
+ +enum { DARWIN_NOTE_STALE_SUBMIT = 0x5354 };
+ +static uint32_t darwin_stale_submits;
+ +
+- static void *
+- darwin_submit_create(struct tu_device *device)
+- {
+-@@ -1178,6 +1280,11 @@ darwin_submit_add_entries(struct tu_device *device, void *_submit,
++ /* Submissions that took more than one kernel submission: [0] such submissions, [1] cuts made where a command buffer begins, [2] cuts
++  * made inside a command stream (no command buffer began within reach), [3] the most indirect buffers one submission had.
++  */
++@@ -1215,6 +1317,11 @@ darwin_submit_add_entries(struct tu_device *device, void *_submit,
+     NativeAdrenoAbiSubmitBuffer *cmds = (NativeAdrenoAbiSubmitBuffer *)
+        util_dynarray_grow(&submit->commands, NativeAdrenoAbiSubmitBuffer, num_entries);
+     for (unsigned i = 0; i < num_entries; i++) {
+@@ -172,7 +172,7 @@ index f5de114..b9917d1 100644
+        cmds[i] = (NativeAdrenoAbiSubmitBuffer) {
+           .handle = entries[i].bo->darwin_handle,
+           .iova = entries[i].bo->iova + entries[i].offset,
+-@@ -1362,6 +1469,9 @@ darwin_note_fence(uint32_t fence)
++@@ -1399,6 +1506,9 @@ darwin_note_fence(uint32_t fence)
+     }
+     dw.inflight[dw.inflight_count++] = fence;
+     dw.last_fence = fence;
+@@ -182,7 +182,7 @@ index f5de114..b9917d1 100644
+  }
+  
+  #ifdef __APPLE__
+-@@ -1466,6 +1576,8 @@ darwin_queue_submit(struct tu_queue *queue, void *_submit,
++@@ -1503,6 +1613,8 @@ darwin_queue_submit(struct tu_queue *queue, void *_submit,
+  {
+     struct tu_darwin_queue_submit *submit = (struct tu_darwin_queue_submit *)_submit;
+     struct tu_device *dev = queue->device;
+@@ -191,7 +191,7 @@ index f5de114..b9917d1 100644
+  
+     /* Syncs belong to this client, whose Vulkan queues all use kernel queue 0.
+      * That queue stays on one ring until its outstanding prefix completes, including
+-@@ -1483,7 +1595,23 @@ darwin_queue_submit(struct tu_queue *queue, void *_submit,
++@@ -1520,7 +1632,23 @@ darwin_queue_submit(struct tu_queue *queue, void *_submit,
+     rec.sync_wait_us = (uint32_t)((tu_trace_clock_ns() - rec.ns) / 1000);
+  
+     uint32_t fence = 0;
+diff --git a/scripts/macho-self-bind-weak-imports.py b/scripts/macho-self-bind-weak-imports.py
+index 29ab88a..fbd6b20 100755
+--- a/scripts/macho-self-bind-weak-imports.py
++++ b/scripts/macho-self-bind-weak-imports.py
+@@ -27,7 +27,10 @@ for _ in range(commands):
+         fixups = struct.unpack_from('<I', data, at + 8)[0]
+     at += size
+ if fixups is None:
+-    sys.exit(path + ': no chained fixups')
++    # gts7xlwifi: the arm64 iOS 17 Turnip links with classic dyld binding opcodes (LC_DYLD_INFO_ONLY; -undefined dynamic_lookup keeps
++    # ld64 off chained fixups there), whose weak flat imports dyld resolves as it always has. Left unchanged, as before this step existed.
++    print(path + ': no chained fixups (classic binding info); left unchanged')
++    sys.exit(0)
+ _, _, imports, _, count, form, _ = struct.unpack_from('<7I', data, fixups)
+ # DYLD_CHAINED_IMPORT (1) and _ADDEND (2): ordinal in bits 0-7, weak in bit 8. _ADDEND64 (3): ordinal in bits 0-15, weak in bit 16.
+ size, ordinal_bits = {1: (4, 8), 2: (8, 8), 3: (16, 16)}[form]
+-- 
+2.54.0 (Apple Git-157)
+

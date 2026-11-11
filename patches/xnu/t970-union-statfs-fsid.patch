@@ -1,0 +1,26 @@
+--- a/bsd/vfs/vfs_syscalls.c
++++ b/bsd/vfs/vfs_syscalls.c
+@@ -3572,6 +3572,23 @@
+ 	sfs->f_files = vsfs->f_files;
+ 	sfs->f_ffree = vsfs->f_ffree;
+ 	sfs->f_fsid = vsfs->f_fsid;
++	/*
++	 * gts7xlwifi (t970-fsid=1), UniXNU native-union-statfs-fsid.patch for 21H461: the SystemOS volume is a union over the root
++	 * volume, while an Apple device has these files on one system partition. BaseBoard's BSPathExistsOnSystemPartition compares
++	 * this number for /System with the one for a daemon's executable; lockdownd's pairing then fails (UserDeniedPairing with no
++	 * dialog). Report the root volume's number for that union. Off by default.
++	 */
++	{
++		static int t970_union_fsid = -1;
++		if (t970_union_fsid < 0) {
++			int value = 0;
++			t970_union_fsid = (PE_parse_boot_argn("t970-fsid", &value, sizeof(value)) && value == 1) ? 1 : 0;
++		}
++		if (t970_union_fsid && (mp->mnt_flag & MNT_UNION) && mp->mnt_vnodecovered != NULLVP &&
++		    (mp->mnt_vnodecovered->v_flag & VROOT) && (mp->mnt_vnodecovered->v_mount->mnt_flag & MNT_ROOTFS)) {
++			sfs->f_fsid = mp->mnt_vnodecovered->v_mount->mnt_vfsstat.f_fsid;
++		}
++	}
+ 	sfs->f_owner = vsfs->f_owner;
+ 	sfs->f_type = mp->mnt_vtable->vfc_typenum;
+ 	sfs->f_flags = mp->mnt_flag & MNT_VISFLAGMASK;

@@ -1,6 +1,7 @@
 # USB plan: charging limits and QcomDwc3 on SM-T970 (iPadOS 17.7.11, 21H461)
 
-Status 2026-11-08: part 1 (charging) is written and syntax-checked and waits for a boot. Part 2 (QcomDwc3) is a plan plus a
+Status 2026-11-11: part 1 (charging) written; part 3 (console USB 3) booted at HS; part 4 (QcomDwc3 step 1, device mode, `t970-usb`)
+READY and unbooted. Earlier status: part 2 (QcomDwc3) was a plan plus a
 feasibility check. No QcomDwc3 driver code exists yet.
 
 ## 1. Charging (done in `package/T970Battery.cpp`, `t970-battery=1`)
@@ -222,7 +223,7 @@ Both drivers program the same controller, so only one runs:
 - `t970-usb=1` (short, the boot line is near its limit) makes `qcom_usb_debug_init`/`qcom_usb_debug_t970_retry` return at once.
   The check sits in `T970WifiProbe.cpp`'s retry thread and in the early `PE_init_kprintf` path. `qcom-usb-debug=1` can stay on the
   line, so switching back means removing one argument.
-- While QcomDwc3 owns the controller, logs still go to the winre log (`sheng-log=1`). The `[usb]` rows (`native_usb_stats`) come
+- While QcomDwc3 owns the controller, logs still go to the winre log (`log=1`). The `[usb]` rows (`native_usb_stats`) come
   from `BootLog.c`.
 - Early boot keeps the console. QcomDwc3 starts only after IOKit matching (about 25 s, as the console retry does now), so a debug
   build could use the console until then and hand over. That is a later option; it needs a DWC3 soft reset at handover (the same
@@ -234,7 +235,7 @@ Both drivers program the same controller, so only one runs:
 | --- | --- |
 | `chip-id` / `board-id` / `security-domain` in `/chosen` | Must match the j120ap (T8011) row of MobileDevice's device map, the same identity whose kernelcache we run. Check the current payload ADT before testing |
 | Same fsid for `/System` and the system daemons | Port the `native-union-statfs-fsid` patch to the 21H461 kernel profile, if it is not already in it |
-| Key-bag lock state 3 | `sheng-aks-sls=3` with the board's `sheng-aks=1` stand-in |
+| Key-bag lock state 3 | `aks-sls=3` with the board's `aks=1` stand-in |
 
 ### 2.7 Steps and the expected log at each one
 
@@ -338,3 +339,80 @@ a USB 3 cable, which would mean the lane select is inverted. `qcom-usb-debug=1` 
 - Host mode is not in the console (it has no xHCI). It belongs to QcomDwc3 step 5, which reuses this PHY bring-up with the
   femto host override sequence and the MAX77705 OTG boost.
 
+
+## 4. QcomDwc3 step 1: Apple's device stack on the DWC3 (`t970-usb`, READY 2026-11-11, not booted)
+
+Files: `drivers/QcomDwc3/QcomDwc3Sm8250.cpp` (+ README, license), `package/T970UsbProbe.cpp`, `scripts/build-qcom-dwc3.py`,
+`board.toml` (archive `build-qcom-dwc3.py`, `[kernel.prelink] roots` = profile roots + `com.apple.driver.AppleUSBXDCI`,
+`com.apple.driver.AppleUSBDeviceMux`), `configs/gts7xlwifi_defconfig` (force-load `build/qcom-dwc3/libQcomDwc3.a`),
+`package/T970Battery.cpp` (`t970_battery_start` calls `t970_usb_start`), `package/BootLog.c` (`[dwc3]` rows),
+`drivers/QcomXnuUsbDebug/kernel/QcomXnuUsbDebug.c` (stands down when `t970-usb` bit 0 is set).
+
+### 4.1 The 21H461 AppleUSBXDCI hooks (step 0, from disassembly of the same kernelcache)
+
+| Slot | Hook | Evidence |
+| --- | --- | --- |
+| 179 | keep configurations, `bool` (return false) | pure; AppleT8011USBXDCI checks its IOPort transport type, as upstream's 24A446 slot 179 |
+| 255 | transport active, `bool` (true) | pure; same IOPort check; the caller returns `this+0x23d8` when true |
+| 256 | power on, `IOReturn` | pure; T8011 log string `powerOn`; caller fails on nonzero |
+| 257 | power off | pure; T8011 `powerOff` |
+| 258 | parameters, `void` | pure; T8011 stores {4, 0x2ee, 16, 3} at `this+0x2410`; the init writes [1] to GCTL[31:19], [2] to DCFG[21:17] (NUMP) |
+| 263 | controller reset, `IOReturn` | concrete; `controllerReset … resetting core`; called before the GCTL/DCFG writes above |
+| 264 / 265 | periodic on / off, `void` | pure; T8011 bodies are `ret`; called when the periodic masks `+0x36c/+0x370` leave / return to 0 |
+
+Fields: register map `+0x230`, register VA `+0x238` (T8011 `start` stores `mapDeviceMemoryWithIndex(0)` and its address there;
+slots 250-254 are the register accessors on `+0x238`). Constructor `0xfffffff0065420b4`, destructor (D2) `0xfffffff0065420d4`,
+metaclass `0xfffffff007b29010`, vtable `0xfffffff006ef3700`; bound at original − 0x1000000 (the profile's prelink slide, checked on
+IOHIDDevice's constructor). AppleUSBXDCI's own IOService overrides: free, init, setProperties, willTerminate, start, stop,
+getWorkLoop, callPlatformFunction. DESIRED_POWER (24A446 slot 227) is not a hook here (21H461 slot 227 is `ioGated`), and is only
+needed for host mode.
+
+### 4.2 Bring-up (`[dwc3] st`)
+
+| Stage | Step |
+| --- | --- |
+| (wait) | MUIC route by the `t970-qud-retry` thread (≤ 60 s, `muic` field), then RPMh: ldoa5 0.88, ldoa12 1.8, ldoa2 3.072 V (+ ldoa9 1.2, ldoa18 0.912 V with bit 1); −2 = an HS rail vote failed |
+| 1 / 3 / 4 | map GCC, femto PHY, QSCRATCH; GDSC 0xf004; BCR 0xf000, master RCG 0xf020 200 MHz, mock UTMI RCG 0xf038 XO, branches 0xf07c 0xf080 0xf010 0xf018 0xf01c, QUSB2PHY BCR 0x12000 |
+| 5 | SMMU stage 1 identity context for stream 0 (write-back inner shareable 1 GiB blocks, VMID 0xfc, highest free bank ≥ NUMS2CB; a dead SMR for stream 0 is reused, a live one refuses) |
+| 7 / 8 / 9 | femto PHY init; QMP if bit 1 (else UTMI as PIPE clock); GSNPSID through the Apple window |
+| −9 / −10 / −11 | AppleUSBXDCI kext load / preModLoad / postModLoad failed |
+| 10 / 11 / 12 | nub `usb-drd0` published / controller started / `AppleUSBCableType = USBHost` and power state 4 requested |
+
+### 4.3 Boot args and what to look for
+
+- Line: add `t970-usb=1` (HS) or `t970-usb=5` (HS + sampling, recommended first). Keep `t970-qud-retry=1` (it closes the MUIC switch at
+  ~25 s; the console itself stands down). `qcom-usb-debug=1` can stay; removing `t970-usb` restores the CDC console.
+- Expected: `[dwc3] st 12 … id 5533xxxx … start 1 kext 0 meta 1 on ≥1`; `[dwc3 d] ifc ≥1 mux ≥1`. On the Mac:
+  `ioreg -p IOUSB -l -w0 | grep -E 'idVendor|idProduct|Device Speed'` lists an Apple device (05ac) at 480 Mb/s, and
+  `system_profiler SPUSBDataType` shows it; usbmuxd (`idevice_id -l` with libimobiledevice) lists its UDID.
+- Then `t970-usb=7` for SuperSpeed (`qmp 2`, `seen` bit 0 = U0; only bit 5 = no SS receiver: cable or lane, try `t970-usb=23`).
+
+### 4.4 Not done / risks
+
+- Not built by this session, not booted. Compiled here against the UniXNU-next tree's kernel C++ recipe (`-Werror`): the vtable
+  audit passes (267 slots; owned 0, 1, 7, 86 and the eight hooks; 102 original bindings) and every import is a kernel export.
+- Coherence: upstream relies on SM8550's IO-coherent USB path behind a write-back SMMU context. If SM8250's path is not coherent,
+  the symptom is `ep0OutEventOccurred: event 0` / garbage setup packets (upstream's table); `t970-usb` bit 3 (stream left as found)
+  is the comparison boot.
+- Pairing (step 3): the ADT `chip-id` is the Qualcomm 0x164, not J120's 0x8011/board 0x0C that MobileDevice expects; the Mac may ask
+  for a software update or refuse pairing. `native-union-statfs-fsid` and `aks-sls=3` are also upstream prerequisites. Enumeration and
+  usbmuxd listing do not depend on them.
+- Host mode, cable role from the MAX77705, and the DESIRED_POWER override: later steps.
+- `[kernel.prelink] roots` copies the profile's list (a board list replaces it); re-copy if the profile's roots change.
+
+### 4.5 main7 result and step 3 (pairing) prep, 2026-11-11
+
+main7 (`t970-usb=5 t970-qud-retry=1`): `[dwc3] st 12`, the Mac enumerated `05ac:12ab "iPad"` at 480 Mb/s, `ifc 1 mux 1`, DALEPENA 0xf
+(mux bulk pair on). Checked live afterwards with `scripts/mac-usb-check.py`: usbmuxd lists the tablet, and lockdownd answers over USB
+(QueryType `com.apple.mobile.lockdown`, iPad7,1, J120AP, 17.7.11 21H461) with **ChipID 356** (the payload's Qualcomm 0x164) and no
+BoardId; `xcrun devicectl list devices` shows it by ECID with an empty model.
+
+Prepared (all opt-in):
+- `t970-usb` bit 5 (32): `package/T970UsbProbe.cpp` sets `/chosen` chip-id 0x8011, board-id 12, security-domain 1 (J120's values, as
+  UniXNU's profile 24A446 does in its ADT) from the late hook before launchd. Platform kexts read `/chosen` earlier and keep 0x164.
+  `[dwc3] … ident 0xc8011` = written.
+- `patches/xnu/t970-mgcache-once.patch`: the MG cache reset marker now names the identity mode (`.t970-display-policy-2` /
+  `-2-j120`, the other renamed `.old`), so MG recomputes ChipID once whenever bit 5 changes.
+- `patches/xnu/t970-union-statfs-fsid.patch` (new, end of the series), `t970-fsid=1`: upstream's native-union-statfs-fsid for 21H461
+  (statfs of the SystemOS union reports the root volume's fsid; BaseBoard's same-partition check, otherwise UserDeniedPairing).
+- `aks-sls=3` (existing KeyStoreProbe switch): MobileKeyBag "no passcode", so Trust does not ask for a passcode.

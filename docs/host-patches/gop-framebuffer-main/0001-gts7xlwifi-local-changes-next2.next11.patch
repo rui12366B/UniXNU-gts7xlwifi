@@ -1,0 +1,27 @@
+From 5f33e896c81c06f2da00d252e77a3405d2fc7aa1 Mon Sep 17 00:00:00 2001
+From: gts7xlwifi port <gts7xlwifi@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 06:01:27 +0000
+Subject: [PATCH] gts7xlwifi: local changes (next2..next11)
+
+---
+ NativeGOPWire.h | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/NativeGOPWire.h b/NativeGOPWire.h
+index 248e938..e3e0f0a 100644
+--- a/NativeGOPWire.h
++++ b/NativeGOPWire.h
+@@ -4,7 +4,9 @@
+ #include <stdint.h>
+ // Scanout format (NGPMode) and frame formats (NGPSwap.format). A half-float frame is RGBA 16F rows, converted to the scanout's BGRX by the
+ // client on the GPU: LINEAR holds linear light (encoded to sRGB on the way), ENCODED holds values already sRGB-encoded.
+-enum { NGP_BGRX8888=1,NGP_RGBA16F_LINEAR=2,NGP_RGBA16F_ENCODED=3,NGP_VERSION=1 };
++// gts7xlwifi: XR10 is plane 0 of a 'b3a8' surface (32-bit BGR10 extended range: blue bits 0-9, green 10-19, red 20-29, 384..894 is
++// 0..1), converted to BGRX on the GPU as the display driver's convertXrRows does on the CPU; the alpha plane is ignored.
++enum { NGP_BGRX8888=1,NGP_RGBA16F_LINEAR=2,NGP_RGBA16F_ENCODED=3,NGP_XR10=4,NGP_VERSION=1 };
+ struct NGPMode {uint32_t version,format;uint64_t width,height,stride,bytes;};
+ struct NGPPresent {uint64_t address,bytes;uint32_t width,height,stride,format;};
+ struct NGPTransfer {uint64_t sequence,bytes;};
+-- 
+2.54.0 (Apple Git-157)
+

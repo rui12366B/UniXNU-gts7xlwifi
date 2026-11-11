@@ -451,7 +451,13 @@ void worker(void *, wait_result_t) {
 }
 }
 
+// A weak empty definition: the kernel links without libQcomDwc3.a; package/T970UsbProbe.cpp's strong one replaces it when present.
+extern "C" __attribute__((weak)) void t970_usb_start(void) {}
 extern "C" void t970_battery_start(void) {
+    // Apple's USB device stack on the DWC3 (package/T970UsbProbe.cpp, t970-usb=<bits>): started from here, the board's one late
+    // hook for battery and USB, whether or not the battery service runs. Once only, like the battery thread below.
+    static unsigned usbStarted;
+    if (!__atomic_exchange_n(&usbStarted, 1u, __ATOMIC_ACQ_REL)) t970_usb_start();
     unsigned enabled = 0;
     if (!PE_parse_boot_argn("t970-battery", &enabled, sizeof enabled) || enabled != 1) return;
     static unsigned started;

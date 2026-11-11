@@ -13,7 +13,7 @@
 extern "C" IOMemoryDescriptor *t970_camera_memory(uint32_t type);        // retained; null when absent
 extern "C" int t970_camera_request(uint32_t selector, uint32_t a, uint32_t b);   // 0 accepted
 // [9] service state (1 published; negative: the step that failed), [10] opens | starts << 8 | maps << 16 | closes << 24
-extern "C" {extern volatile int32_t t970_camera_c5[12];}
+extern "C" {extern volatile int32_t t970_camera_c5[20];}
 
 namespace {
 void bump(unsigned shift) {
@@ -62,10 +62,10 @@ public:
                             void *reference) override {
         if (args->structureInputSize) return kIOReturnBadArgument;
         uint32_t a = 0, b = 0;
-        if (selector == T970CameraSetExposure) {
+        if (selector == T970CameraSetExposure || selector == T970CameraReport) {
             if (args->scalarInputCount != 2) return kIOReturnBadArgument;
             a = uint32_t(args->scalarInput[0]); b = uint32_t(args->scalarInput[1]);
-        } else if (selector > T970CameraStop || args->scalarInputCount) {
+        } else if (selector > T970CameraReport || args->scalarInputCount) {
             return kIOReturnBadArgument;
         }
         if (selector == T970CameraStart) bump(8);

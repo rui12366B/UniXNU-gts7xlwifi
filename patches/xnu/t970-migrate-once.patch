@@ -6,7 +6,7 @@ index 3455bc1..e3c4ed0 100644
  	vnode_put(vp);
  }
  
-+/* gts7xlwifi: install the staged system apps. sheng-staged-apps=1 copied them into Data (v91: 6574 directories, 445 MiB), but only
++/* gts7xlwifi: install the staged system apps. staged-apps=1 copied them into Data (v91: 6574 directories, 445 MiB), but only
 + * SystemAppMigrator installs them, and it runs only in the first-boot data migration, which the Data seed skips: its
 + * com.apple.migration preferences carry LastSystemVersion = the OS build (seed-data-skip-setup.py). Once the copy is complete
 + * (/private/var/db/.sheng-staged-apps), this moves those preferences, and com.apple.DataMigration's where it exists, aside once,

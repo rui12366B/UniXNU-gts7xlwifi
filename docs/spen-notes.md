@@ -58,15 +58,16 @@ the driver panics rather than touch a secure pin.
 | 2048 | The old separate HID pen device (combo23/24b; backboardd never listed its service) |
 | 4096 | Separate device only: application collection Stylus (0x20), backboardd's pencil digitizer pair 0x0D/0x20 |
 
-`t970-pen-xform=<bits>` (1 swap raw axes, 2 mirror x, 4 mirror y; default 4) and `t970-pen-i2c=<half period us>` (default 4).
+`t970-pen-xform=<bits>` (1 swap raw axes, 2 mirror x, 4 mirror y; default 0) and `t970-pen-i2c=<half period us>` (default 4).
 
-The default mapping: the raw x axis is the long one (22656 vs 14160). Android's y-invert + switch gives portrait (X short); the touch
-core maps that portrait space to the 2800 x 1752 frame buffer by swapping back, so in raw terms only y stays mirrored. Confirm with the
-`xy` field of the boot row against a known corner.
+The default mapping is the raw axes as they are (raw x along the long side). The first default, 4 (mirror y), was derived from
+Android's `wacom,invert = <0 1 1>` plus the touch core's swap; on the device (main3) that put the pen point mirrored top/bottom, and
+the user confirmed the vertical flip, so the default is 0. The first 12 tip-downs are logged as `tip X,Y px raw RX,RY` (frame-buffer
+pixels, the units of the [t970 touch] xy field).
 
 ## HID
 
-Default (bit 4): no HID device of its own. The touch device (NativeHidInput with sheng-touch-hid=1, the service backboardd takes touches
+Default (bit 4): no HID device of its own. The touch device (NativeHidInput with touch-hid=1, the service backboardd takes touches
 from) carries the pen in its report 3:
 - Stylus: a Stylus physical collection inside its Touch Screen application collection, after Contact Count (report 3 grows from 62 to
   72 bytes): Tip Switch, Barrel Switch, Invert, Eraser, In Range, Contact Identifier 10, X/Y 0..32767, Tip Pressure 0..4095, X/Y Tilt
@@ -97,6 +98,29 @@ every report, but backboardd never listed the service.
   device's event driver (0 = nobody opened it).
 - combo25 (stylus inside report 3) and combo25p (pen as finger, t970-pen=31): nothing in the UI, touch fine. Both used contact
   identifier 0xfe; backboardd's addContact drops path index >= 31 (`cmp x23, #0x1f`), so the pen contact was thrown away. READY 5: 10.
+
+### Pressure, buttons, hover (IOHIDFamily-2031.120.4 source)
+
+- Tip Pressure: IOHIDEventDriver reads it with getScaledFixedValue(Calibrated) and never calibrates it; an uncalibrated element maps its
+  logical range onto -1..1. So the descriptor declares -4095..4095 and sends 0..4095: tip pressure = p/4095 (0..1). Before READY 10 a
+  light press arrived as -1.
+- Force in UIKit (donor UIKitCore, disassembled read-only): a pencil touch's force = event pressure / (120 x
+  _AXSForceTouchSensitivity()), maximumPossibleForce = maximum pressure / 120; the maximum is the event's backboardd digitizer
+  attributes' maximumForce (backboardd sets those only for trackpads) or, for a pencil, 1000. So UIKit wants pencil pressure on a
+  0..1000 scale; 0..1 gave force <= 0.008 and constant-width strokes (main4). The driver can't produce more than 1.0 from a
+  descriptor, so the pencil device's driver gets a wrapped dispatchEvent (pencil::install, like edge::install) that multiplies each
+  stylus event's pressure by t970-pen-force (default 1000; IOHIDEvent setFixedValue = vtable slot 26). Pen log: "force wrapper on
+  x1000", "force first p .. -> ..".
+- maximumPossibleForce (main5b: still constant width): backboardd's direct-touch path reads the digitizer service property
+  `AccurateMaxDigitizerPressureValue` once (0 if absent) and puts it in every event's digitizer attributes as maximumForce; UIKit's
+  maximumPossibleForce = that / 120, and PencilKit (+[PKInputPointUtility drawingInputPoint:...]) records force -1 ("no force")
+  when maximumPossibleForce <= 0. stampPen now publishes it (= t970-pen-force, 1000) on the pencil driver and its interface.
+- X/Y Tilt: the driver only marks them handled; the event keeps tilt orientation 0. Altitude/azimuth would need the event's polar
+  orientation set after the fact (field macros not public); not done.
+- Barrel switch -> button mask bit 1, Eraser -> bit 2. iPadOS 17 on this model (J120, Apple Pencil 1) has no barrel button or eraser
+  end for UIKit; Pencil 2 double-tap comes from the Pencil's own Bluetooth service, not the digitizer.
+- Hover: iPadOS Pencil hover needs M2 iPad Pro + Pencil 2, so none on J120. The driver also drops the out-of-range event of a pen that
+  only hovered ("multiple untouch"), so backboardd sees rangeIn without rangeOut; harmless for drawing.
 
 ## Boot log rows
 

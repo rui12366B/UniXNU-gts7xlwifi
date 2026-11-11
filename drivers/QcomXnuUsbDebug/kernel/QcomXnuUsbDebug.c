@@ -937,6 +937,14 @@ int qcom_usb_debug_init(void)
     if (!PE_parse_boot_argn("qcom-usb-debug", &enabled, sizeof(enabled)) || enabled != 1) {
         native.status.phase = QCOM_USB_DEBUG_DISABLED; goto out;
     }
+    /* gts7xlwifi: t970-usb bit 0 gives the controller to Apple's own device stack (drivers/QcomDwc3, package/T970UsbProbe.cpp);
+     * the console stays out of the hardware, early and late. Removing t970-usb brings it back unchanged. */
+    {
+        int usb = 0;
+        if (PE_parse_boot_argn("t970-usb", &usb, sizeof(usb)) && (usb & 1)) {
+            native.status.phase = QCOM_USB_DEBUG_DISABLED; goto out;
+        }
+    }
     /* gts7xlwifi: with the late retry on, the early attempt stays out of the hardware. It cannot power the USB2 PHY, fails at the
      * core init and leaves a DMA domain lease the retry's qualification then refuses (periph5: error 10 DMA_REFUSED). The retry
      * resets the phase and makes the one attempt. */
@@ -1801,6 +1809,10 @@ int qcom_usb_debug_t970_retry(void)
     int ok;
     t970_qud_phy[9] = (int32_t)((uint32_t)t970_qud_phy[9] + 1u);
     if (native.status.phase == QCOM_USB_DEBUG_ACTIVE) return 1;
+    {
+        int usb = 0;   /* t970-usb: QcomDwc3 owns the controller; nothing is mapped, voted or written here */
+        if (PE_parse_boot_argn("t970-usb", &usb, sizeof(usb)) && (usb & 1)) return 0;
+    }
     native.status.phase = QCOM_USB_DEBUG_NOT_INITIALIZED;
     native.status.error = 0;
     native.status.io_failed = 0;

@@ -1,6 +1,6 @@
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
-@@ -8044,7 +8044,62 @@
+@@ -8044,7 +8044,71 @@
  		native_t970_migrate[0] = -2;
  	} else {
  		native_t970_migrate[0] = 1;
@@ -11,9 +11,13 @@
 + * 21H461-srgb-bgra8-1) changes MobileGestalt answers such as hasExtendedColorDisplay, but MG persists its answers. Once per
 + * policy version (/private/var/db/.t970-display-policy-2; -2: the Bluetooth address, t970-bt serve), before launchd starts, this moves MG's persisted caches aside
 + * (".t970" suffix) so every consumer recomputes them from the ADT. Counters for the boot log: [0] stage (1 moved, 2 done
-+ * before, -2 the marker failed), [1] files moved, [2] the last error. */
++ * before, -2 the marker failed), [1] files moved, [2] the last error.
++ * The marker also names the USB identity mode: t970-usb bits 0 and 5 make the board present J120's chip-id/board-id in /chosen
++ * (package/T970UsbProbe.cpp), which MG answers as ChipID. Each mode has its own marker and the other one is renamed aside
++ * (".old"), so switching the mode recomputes MG once in either direction. */
 +volatile int native_t970_mgcache[3] = {0, 0, 0};
 +static const char native_t970_mgcache_marker[] = "/private/var/db/.t970-display-policy-2";
++static const char native_t970_mgcache_marker_j120[] = "/private/var/db/.t970-display-policy-2-j120";
 +static void
 +native_t970_mgcache_once(proc_t p, user_addr_t scratch)
 +{
@@ -25,32 +29,37 @@
 +	};
 +	vfs_context_t ctx = vfs_context_current();
 +	vnode_t vp = NULLVP;
-+	if (!vnode_lookup(native_t970_mgcache_marker, VNODE_LOOKUP_NOFOLLOW, &vp, ctx)) {
++	int usb = 0;
++	const int j120 = PE_parse_boot_argn("t970-usb", &usb, sizeof(usb)) && (usb & 33) == 33;
++	const char *marker_path = j120 ? native_t970_mgcache_marker_j120 : native_t970_mgcache_marker;
++	const char *other_path = j120 ? native_t970_mgcache_marker : native_t970_mgcache_marker_j120;
++	if (!vnode_lookup(marker_path, VNODE_LOOKUP_NOFOLLOW, &vp, ctx)) {
 +		vnode_put(vp);
 +		native_t970_mgcache[0] = 2;
 +		return;
 +	}
 +	char to[192];
-+	for (int i = 0; i < 4; i++) {
++	for (int i = 0; i < 5; i++) {
++		const char *from = i < 4 ? caches[i] : other_path;   /* the last one: the other mode's marker */
 +		/* Same scratch page layout as native_t970_migrate_once: source at +0xa00, target at +0xc00 (512 bytes each). */
 +		struct rename_args request = {.from = scratch + 0xa00, .to = scratch + 0xc00};
 +		int32_t result = 0;
-+		snprintf(to, sizeof(to), "%s.t970", caches[i]);
-+		int error = copyout(caches[i], request.from, strlen(caches[i]) + 1);
++		snprintf(to, sizeof(to), i < 4 ? "%s.t970" : "%s.old", from);
++		int error = copyout(from, request.from, strlen(from) + 1);
 +		if (!error) {
 +			error = copyout(to, request.to, strlen(to) + 1);
 +		}
 +		if (!error) {
 +			error = rename(p, &request, &result);
 +		}
-+		if (!error) {
++		if (!error && i < 4) {
 +			native_t970_mgcache[1]++;
-+		} else if (error != ENOENT) {
++		} else if (error && error != ENOENT) {
 +			native_t970_mgcache[2] = error;
 +		}
  	}
 +	vnode_t marker = NULLVP;
-+	int error = vnode_open(native_t970_mgcache_marker, O_CREAT | O_TRUNC | FWRITE | O_NOFOLLOW, 0644, 0, &marker, ctx);
++	int error = vnode_open(marker_path, O_CREAT | O_TRUNC | FWRITE | O_NOFOLLOW, 0644, 0, &marker, ctx);
 +	if (!error) {
 +		error = vnode_close(marker, FWRITE, ctx);
 +	}
@@ -63,7 +72,7 @@
  }
  
  static int
-@@ -8108,6 +8163,7 @@
+@@ -8108,6 +8172,7 @@
  	if (!error) native_gpu_addon_prepare(p, scratch);
  	if (!error) native_staged_apps_prepare(p, scratch, data_mount);
  	if (!error) native_t970_migrate_once(p, scratch);

@@ -7,7 +7,7 @@ name = "gts7xlwifi"
 soc = "SM8250"
 soc_source = "sm8250"
 os_profile = "ipados-17.7.11-21H461"
-description = "Samsung Galaxy Tab S7+ Wi-Fi (SM-T970, gts7xlwifi): iPadOS desktop, 8 cores, GPU, touch, USB console, battery"
+description = "Samsung Galaxy Tab S7+ Wi-Fi (SM-T970, gts7xlwifi): iPadOS desktop, 8 cores, 6.7 GB RAM, GPU, touch, S Pen (Apple Pencil), Wi-Fi, Bluetooth, audio + mic, USB (Finder), battery"
 kit = "gts7xlwifi"
 
 [components]
@@ -50,6 +50,9 @@ archives = [
   "build-adreno650.py",
   # The CDC-ACM debug console over the DWC3 the bootloader leaves in DEVICE mode (drivers/QcomXnuUsbDebug).
   "build-qcom-usb-debug.py",
+  # Apple's own USB device stack on the DWC3 (drivers/QcomDwc3 SM8250 port + package/T970UsbProbe.cpp, t970-usb=<bits>), bound to
+  # the prelinked original AppleUSBXDCI; force-loaded by configs/gts7xlwifi_defconfig. Nothing in it runs without the boot argument.
+  "build-qcom-dwc3.py",
   # Wi-Fi stage 6 (t970-wifi=6): Linux v7.0.14 ath11k (QCA6390 hw2.0) with mac80211/cfg80211, MHI, QMI and QRTR on the UniXNU
   # Ath12kWifi module, plus package/T970WifiStack.cpp and T970WifiNet.cpp, into build/t970-wifi/libT970Wifi.a; force-loaded by
   # configs/gts7xlwifi_defconfig. Nothing in it runs without the boot argument.
@@ -58,6 +61,12 @@ archives = [
   # needs an archive entry (alioth does the same).
   "component:ShengHidInput",
 ]
+
+[kernel.prelink]
+# The OS profile's roots (profiles/os/ipados-17.7.11-21H461/profile.toml, copied: a board list replaces the profile's) plus
+# Apple's USB device stack for QcomDwc3 (t970-usb): AppleUSBXDCI (no personality: T970UsbProbe.cpp loads it; it brings
+# IOUSBDeviceFamily and AppleUSBCommon) and AppleUSBDeviceMux (usbmuxd's transport, matched on the device interface).
+roots = ["com.apple.AppleFSCompression.AppleFSCompressionTypeZlib", "com.apple.driver.AppleARMPlatform", "com.apple.driver.AppleARMWatchdogTimer", "com.apple.driver.AppleAudioClockLibs", "com.apple.driver.AppleEffaceableStorage", "com.apple.driver.AppleIISController", "com.apple.driver.AppleM2ScalerCSCDriver", "com.apple.driver.AppleMobileFileIntegrity", "com.apple.driver.ApplePMGR", "com.apple.driver.IODARTFamily", "com.apple.filesystems.apfs", "com.apple.iokit.CoreAnalyticsFamily", "com.apple.iokit.IOAVFamily", "com.apple.iokit.IOAudio2Family", "com.apple.iokit.IOCECFamily", "com.apple.iokit.IOCryptoAcceleratorFamily", "com.apple.iokit.IOGPUFamily", "com.apple.iokit.IOHDCPFamily", "com.apple.iokit.IOMobileGraphicsFamily", "com.apple.iokit.IOReportFamily", "com.apple.iokit.IOSlowAdaptiveClockingFamily", "com.apple.iokit.IOStorageFamily", "com.apple.iokit.IOSurface", "com.apple.kec.Libm", "com.apple.kec.corecrypto", "com.apple.kext.AppleMatch", "com.apple.kext.CoreTrust", "com.apple.security.AppleImage4", "com.apple.security.sandbox", "com.apple.iokit.IOHIDFamily", "com.apple.iokit.IOHIDEventDriver", "com.apple.driver.AppleUSBXDCI", "com.apple.driver.AppleUSBDeviceMux"]
 
 [device_tree]
 source = "device:dts/gts7xlwifi.dts"
@@ -114,7 +123,7 @@ title = "UniXNU"
 # Full span from 0x80000000 to the end of the last bank (0x280000000).
 dram_size = "0x200000000"
 # Eight cores with the SM8250 IPI routing UniXNU-alioth/sheng qualified: ArmCpu issues PSCI
-# CPU_ON only with sheng-smp; SGIs do not reach these cores, so IPIs are SPIs and each core
+# CPU_ON only with smp; SGIs do not reach these cores, so IPIs are SPIs and each core
 # signals itself once. armcpu-diagnostics reports each SMP step on the console.
 # The two unchanged 21H461 trust-cache modules (StaticTrustCache 2478 entries, then
 # Cryptex1,SystemTrustCache 76), bundled as scripts/build-original-system-trust.py does
@@ -122,7 +131,7 @@ dram_size = "0x200000000"
 # refuses launchd's first exec.
 # The original two Apple modules, and (since the GPU) the owner bundle: one module with the NativeAdrenoMetal plugin, adrenoprobed and
 # Turnip CDHashes (UniXNU-fft scripts/make-owner-trust-bundle.py) followed by the same two modules byte for byte.
-trust_cache_sha256 = ["7416ca4f8377146626bb284e2133c76bee6cb4e3ee0af5d648b186235a7323a7", "fc39331d4cba48e06890dacf720dfd13ba6fab75e45c30243f42ec97c5ff4263", "b7c1de0a3b08853929112b554017924b4ac0efc35410a5147411cdcf7e68a12e", "1a94e84f95c3698a6eccb08870bbda4199dfe978dcb616d37d374a64c35cce34", "d13fbd6b547b9b83cb5923ca085a27df2aa9210d7559d826626d2c3feeda2021", "24b7bf159377cb220ee17463b3427951b94ea1ef5f3f566f31331893b61c8b08", "132b25f0a8145ce84dc9cf62a3f38f4c2ebf5e9683b88bf18a555dc771749093", "533159bd66cea7323de2544da7dbdaaf278cc024fc58b9faca131dacd4ff60a5", "88fa6e6c563a6b7cace58bc95649ef4b986cbb1ed39076a1cdc467b9c0612862", "199f5671204c9f15cb46ce50f09e5cf412ac17205243ebf7b5b8cefce2571f0a", "a4a56f90d8684e471bc0ecc40f030450a99e3c003aef334047b89ade7a14beb3", "d60812475e6cf9f91cffffc09fb0b44021786a70307df2554bc60d96d5e8bdb1", "b2a0c595225a818e2c492adb9f74c88c71b438eae7ae8e5a5530910d28d8872a", "b88a63ac3af19089761d72da041a6cef59012ad98a8e7b090c161f54009b27c3", "6082a8c9e4cc951dd73cc411c173dd88e8d6671aeb9aaf835161c3d95e30b573", "d31d996cbb9e22a9d8377f9ce950111314aafedfc68c38d23616924b3775aee0", "36b95cf183fad2f1898c7e7af55d10ecc8c7226a75ee1cb1a3df53ac683b0e1b", "5188f4d1164edc2aa65b6622538b49ca068bbce682bb7830248baa3e87dcfb3b", "00ab9b2406d267a14957b2a57dfb59ef2389969b5346f98c1c61a72bf95ca633", "1b06a6d1da9dbee4c751e0bfc32b305fb8705dbf083987bae7e857c3ef0e814d", "04ec54ca28f9b5fcc58cf49734124216e3303d0ec7544a7d1b4601c72d65c945", "05d96db7abb7a25fcc29fbafe6a99f10d30d163c45a8d533440d9f0dfe227b00", "737806b1e36fefa30b8662420a8bf7cbbf83662cb40258fbf6bd9b65e1172986", "db914f064287081525fc6a2e8fccd6071d6c385f2eab938d1e1c3719a8a79634", "e92b45498779fa906eedb56d9b5f41c67b7c1adf6faf0c9e1767f1f6cfed0d4b", "8463bc89f0bc93e9290c8640e8e029e98f47a5934473e47f8da47ad0438fab64"]
+trust_cache_sha256 = ["7416ca4f8377146626bb284e2133c76bee6cb4e3ee0af5d648b186235a7323a7", "fc39331d4cba48e06890dacf720dfd13ba6fab75e45c30243f42ec97c5ff4263", "b7c1de0a3b08853929112b554017924b4ac0efc35410a5147411cdcf7e68a12e", "1a94e84f95c3698a6eccb08870bbda4199dfe978dcb616d37d374a64c35cce34", "d13fbd6b547b9b83cb5923ca085a27df2aa9210d7559d826626d2c3feeda2021", "24b7bf159377cb220ee17463b3427951b94ea1ef5f3f566f31331893b61c8b08", "132b25f0a8145ce84dc9cf62a3f38f4c2ebf5e9683b88bf18a555dc771749093", "533159bd66cea7323de2544da7dbdaaf278cc024fc58b9faca131dacd4ff60a5", "88fa6e6c563a6b7cace58bc95649ef4b986cbb1ed39076a1cdc467b9c0612862", "199f5671204c9f15cb46ce50f09e5cf412ac17205243ebf7b5b8cefce2571f0a", "a4a56f90d8684e471bc0ecc40f030450a99e3c003aef334047b89ade7a14beb3", "d60812475e6cf9f91cffffc09fb0b44021786a70307df2554bc60d96d5e8bdb1", "b2a0c595225a818e2c492adb9f74c88c71b438eae7ae8e5a5530910d28d8872a", "b88a63ac3af19089761d72da041a6cef59012ad98a8e7b090c161f54009b27c3", "6082a8c9e4cc951dd73cc411c173dd88e8d6671aeb9aaf835161c3d95e30b573", "d31d996cbb9e22a9d8377f9ce950111314aafedfc68c38d23616924b3775aee0", "36b95cf183fad2f1898c7e7af55d10ecc8c7226a75ee1cb1a3df53ac683b0e1b", "5188f4d1164edc2aa65b6622538b49ca068bbce682bb7830248baa3e87dcfb3b", "00ab9b2406d267a14957b2a57dfb59ef2389969b5346f98c1c61a72bf95ca633", "1b06a6d1da9dbee4c751e0bfc32b305fb8705dbf083987bae7e857c3ef0e814d", "04ec54ca28f9b5fcc58cf49734124216e3303d0ec7544a7d1b4601c72d65c945", "05d96db7abb7a25fcc29fbafe6a99f10d30d163c45a8d533440d9f0dfe227b00", "737806b1e36fefa30b8662420a8bf7cbbf83662cb40258fbf6bd9b65e1172986", "db914f064287081525fc6a2e8fccd6071d6c385f2eab938d1e1c3719a8a79634", "e92b45498779fa906eedb56d9b5f41c67b7c1adf6faf0c9e1767f1f6cfed0d4b", "8463bc89f0bc93e9290c8640e8e029e98f47a5934473e47f8da47ad0438fab64", "2dfd121ecf2a5d56ccc6562f54a2bf4984cbf40222b06b5e8fc38194c60dee8c", "399db8365b4fb69a79b4ffb34e9825316e142d88631ca08076181cbe3cd4ce10", "8649ddd414864426ceff29eaaa0f95e109922970525ed33019beddf911806395", "e8a61522218d7760748d62a7871efd8178a33ee2595670f81dee6e5d157a99a0"]
 # Stage bars (kernel entry, MMU enable) and panic() drawn on the frame buffer
 # (scripts/patch-xnu-entry-probe.py): there is no serial console on this tablet.
 panic_screen = true
@@ -133,12 +142,12 @@ panic_screen = true
 # (BootConsoleMode.h), and NativeLegacyDisplay then is not the primary display: isMainDisplay() is false, so
 # backboardd never presents, and with offline-legacy-pm the start() refusal path stops in the original stop()
 # (v16-v22). The persistent log in winre replaces the verbose console.
-kernel_args = ["kt_fixed_zones=120", "sheng-smp=1",
+kernel_args = ["kt_fixed_zones=120", "smp=1",
   "armcpu-spi-ipi=1", "armcpu-spi-ipi-base=544", "armcpu-self-ipi=1", "armcpu-diagnostics=1",
   # 3 leaves the panel to the GOP display driver once it registers, as alioth.
   "boot-progress=3",
   # Publish the original PMGR nub (ShengPlatformPower mode 2), as alioth.
-  "sheng-pmgr=2",
+  "pmgr=2",
   # ShengUfs: SHNGROOT root on sda39. SM8250 routes the UFS host through SMMU streams 0x0e0 and
   # 0x4e0 (SoC routing, as alioth; the Samsung DT binds no SMMU to ufshc, so the driver only
   # validates the existing bypass contexts read-only before reusing them).
@@ -156,27 +165,27 @@ kernel_args = ["kt_fixed_zones=120", "sheng-smp=1",
   "offline-legacy-register=1", "offline-legacy-gop=1", "offline-legacy-validate=1", "offline-legacy-phase=4",
   "offline-legacy-transfer=1", "offline-legacy-cpu-present=1",
   # No offline-legacy-reached: its stage bands (8 violet, 9 white) stay painted over the UI once it draws (v23).
-  "sheng-vsync=60",
+  "vsync=60",
   # Userspace load, as alioth: fewer daemons and no watchdogd panics while there is no SEP or GPU.
-  "sheng-lite=1", "sheng-disable-jobs=com.apple.liveactivitiesd,com.apple.cryptexd,com.apple.routined",
-  "sheng-disable-watchdogd=1",
+  "lite=1", "disable-jobs=com.apple.liveactivitiesd,com.apple.cryptexd,com.apple.routined",
+  "disable-watchdogd=1",
   # Key store stand-in, HID publisher, key events and the PON/PM8150L buttons (ButtonProbe.cpp).
-  "sheng-aks=1", "offline-hid-input=1", "offline-key-events=1", "alioth-bt=1",
+  "aks=1", "offline-hid-input=1", "offline-key-events=1", "alioth-bt=1",
   # Persistent log (package/BootLog.c) every 2 s into the last 288 MiB of winre (sda40, the old Windows
   # recovery partition), read back from TWRP with deploy/.../read-boot-log.py. ShengUfs refuses it elsewhere.
-  "sheng-log=1",
+  "log=1",
   # Speed without a GPU: vote the highest non-turbo level in all three EPSS domains (package/CpuFreqProbe.cpp; the live
   # FDT has qcom,cpufreq-hw-epss at 0x18591000/2000/3000 like alioth), and write-combine the GOP scanout.
-  "sheng-cpufreq=3", "sheng-cpufreq-cap=2000", "qcom-usb-debug=1", "qcom-usb-ctl=1", "t970-fb-wc=1", "t970-fb-src-wb=1",
+  "cpufreq=3", "cpufreq-cap=2000", "qcom-usb-debug=1", "qcom-usb-ctl=1", "t970-fb-wc=1", "t970-fb-src-wb=1",
   # Touch: package/T970FtsTouch.cpp (STM fts1ba90a, GPIO I2C on GPIO 12/13, RPMh L13/L14) feeding ShengHidInput.
   # t970-touch-xform: 1 swap axes (default), 2 mirror x, 4 mirror y.
-  "pipa-gpu=12", "pipa-turnip-debug=noubwc,nocb", "sheng-gpu-addon=1", "sheng-fb-gpu=1", "native-touch=1", "sheng-touch-hid=1", "t970-touch-xform=5",
+  "pipa-gpu=12", "pipa-turnip-debug=noubwc,nocb", "gpu-addon=1", "fb-gpu=1", "native-touch=1", "touch-hid=1", "t970-touch-xform=5",
   # next2: direct scanout (the display fetches the compositor's surface: NativeUfs DpuWindow.h + NativeLegacyDisplay's T970 pipe
   # discovery; it declines itself and keeps the GPU copy when the window or the pipes are not as expected, [direct] row), and the
   # wallpaper freeze (AdrenoMetal: a Poster process's first big frame is kept, its later command buffers are held back).
   # Room: keepsyms, pipa-gpu-pool (BOs are pageable system memory now, the pool default is 0), offline-legacy-verdict (an early
-  # bring-up panic) and sheng-staged-apps=1 (the copy finished in v91; t970-migrate-once.patch installs them) left the line.
-  "sheng-dpu-scanout=2", "sheng-wallpaper-freeze=1"]
+  # bring-up panic) and staged-apps=1 (the copy finished in v91; t970-migrate-once.patch installs them) left the line.
+  "dpu-scanout=2", "wallpaper-freeze=1"]
 # Brightness (package/BacklightProbe.cpp, the S6TUUM3 panel over DSI0 and DSI1) is on without an argument: the command line
 # is at its 1000-byte limit. t970-bl=0 turns it off.
 # Text fixups (kernel native-text-fixup.patch, applied to a signed page before it first runs, re-applied on page-in): this array
@@ -245,6 +254,16 @@ display-scale = 2
 # run the firmware still owns inside the managed range (firmware-t970 DarwinBoot.c T970ExportMemoryMap, also written to
 # EFI/UniXNU/t970-memmap.txt on the ESP). The firmware's own allocations there reset the tablet when the kernel used them (v53, v55).
 t970-dram-holes = "0000c0ff000000000000100b00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+# Free DRAM below the kernel's window (0x10AD00000) for patches/xnu/t970-memory-outside.patch (UniXNU 8f5a4e9 ported to
+# xnu-10063), opt-in with memory-outside=1. Static: firmware-t970's DarwinBoot fills no outside table, and the firmware keeps
+# all of this reserved (ProtectedLow2/3, ProtectedMid), so UEFI never touches it. Only what Android lists as System RAM
+# (evidence/device-preflight.json iomem, live FDT /reserved-memory): 0x88400000+14M, 0x90A00000+182M, 0x9E400000+12M,
+# 0xA0400000+253M, 0xB1C00000+159M, 0xD0000000+764M = 1384 MiB. docs/ram-outside-window.md.
+darwinboot-memory-outside = "00004088000000000000e000000000000000a090000000000000600b000000000000409e000000000000c00000000000000040a0000000000000d00f000000000000c0b1000000000000f00900000000000000d0000000000000c02f00000000"
+# What the kernel must never adopt even if listed: drivers' fixed addresses (cmd DB, SMEM, SLPI/ADSP pil, audio 0x8DE00000,
+# camera 0x8E300000, GPU zap 0x9031A000), the GOP scanout 0x9C000000, sec_debug/ss_plog, the Wi-Fi arena IOVA 0xA0000000
+# (+4 MiB, PA-equal if a stream ever bypasses the SMMU), Samsung uh_heap, UEFI's 0xC0000000 heap/FD and the sec_debug_rdx hole.
+darwinboot-memory-outside-kept = "0000868000000000000002000000000000009080000000000000200000000000000020890000000000005001000000000000708a000000000000c002000000000000e08d0000000000005000000000000000308e000000000000a0010000000000a031900000000000200000000000000000009c0000000000004002000000000000009f000000000000a00000000000000000a0000000000000400000000000000010b0000000000000b00100000000000000c00000000000000010000000000000c0ff000000000000100b00000000"
 
 [adt.product.string]
 product-name = "iPad Pro (12.9-inch) (2nd generation)"

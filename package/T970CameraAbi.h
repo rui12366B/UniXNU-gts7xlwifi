@@ -21,6 +21,7 @@ enum {
     T970CameraStart = 0,        /* no arguments: power the front sensor and stream until Stop or close */
     T970CameraStop = 1,         /* no arguments */
     T970CameraSetExposure = 2,  /* scalars: coarse integration lines, analogue gain code (0x20 = 1x); 0, 0 = auto exposure */
+    T970CameraReport = 3,       /* scalars: slot 0..7, value: a client's status word for the boot log ([t970 camera c5] d .. p ..) */
 };
 enum {T970CameraMemoryControl = 0, T970CameraMemoryFrames = 1};
 enum {

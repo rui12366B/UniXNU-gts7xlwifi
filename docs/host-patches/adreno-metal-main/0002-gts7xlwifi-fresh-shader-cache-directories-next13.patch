@@ -1,0 +1,26 @@
+From 9045eb02c621a9d13ca3c3a9895738cf68cc707c Mon Sep 17 00:00:00 2001
+From: gts7xlwifi port <gts7xlwifi@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 06:38:40 +0000
+Subject: [PATCH 2/2] gts7xlwifi: fresh shader cache directories (next13)
+
+---
+ SharedShaderCache.h | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/SharedShaderCache.h b/SharedShaderCache.h
+index 5492786..2acf783 100644
+--- a/SharedShaderCache.h
++++ b/SharedShaderCache.h
+@@ -23,7 +23,8 @@ inline std::string sharedShaderCacheDirectory() {
+             passwd user{}, *found=nullptr;
+             std::vector<char> bytes(16384);
+             if (getpwuid_r(getuid(), &user, bytes.data(), bytes.size(), &found) || !found || !user.pw_dir) return {};
+-            root = std::string(user.pw_dir) + "/Library/Caches/org.unixnu.metal";
++            // gts7xlwifi: a directory of its own (next13), so nothing this runtime reads was written by another build of it.
++            root = std::string(user.pw_dir) + "/Library/Caches/org.unixnu.metal.t970";
+         }
+         mkdir(root.c_str(), 0700);
+         struct stat st = {};
+-- 
+2.54.0 (Apple Git-157)
+

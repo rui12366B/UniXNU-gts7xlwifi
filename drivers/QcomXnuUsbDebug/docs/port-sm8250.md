@@ -370,7 +370,7 @@ problems.  Relevant entries:
   backboardd waits for `DataMigration`.
 - `README.md:153-159` — a `systembag.kb` marker was needed before
   AppleKeyStore and keybagd stopped failing.
-- `alioth` already passes `sheng-disable-watchdogd=1` and
+- `alioth` already passes `disable-watchdogd=1` and
   `panic_on_crash_disabled=1` (`board.toml:348`, `:232`), so the dmd /
   ScreenTimeAgent / privacyaccountingd aborts are no longer panicking the
   kernel — they are just repeating.  The vermeer evidence points at Data

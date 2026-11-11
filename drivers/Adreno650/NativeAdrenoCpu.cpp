@@ -9,6 +9,32 @@ extern "C" vm_offset_t phystokv(uint64_t pa);
 extern "C" uint64_t gPhysBase,gPhysSize;   /* the physical range phystokv covers (the kernel's own DRAM); anything else panics in phystokv */
 extern "C" void pmap_set_cache_attributes(ppnum_t pn,unsigned int cacheattr);
 extern "C" unsigned int pmap_cache_attributes(ppnum_t pn);
+/* gts7xlwifi gpufault5: DRAM the kernel manages below gPhysBase (patches/xnu/t970-memory-outside.patch, memory-outside=1): pages of
+ * [vm_outside_first_phys, vm_outside_last_phys) whose bit in vm_outside_valid is set are ordinary VM pages, mapped in the physical
+ * aperture (phystokv has a ptov entry for them) and in the pmap's per-page tables. Weak: a kernel without the patch has none. */
+extern "C" {
+extern uint64_t vm_outside_first_phys __attribute__((weak));
+extern uint64_t vm_outside_last_phys __attribute__((weak));
+extern uint64_t *vm_outside_valid __attribute__((weak));
+}
+/* Whether a page is the kernel's own cacheable DRAM: the span phystokv covers, or an adopted page of the memory outside it. Anything else
+ * is device memory (the firmware framebuffer the display hand-off imports). main2 (memory-outside=1, 195584 pages adopted at 0xD0000000+)
+ * hung the GPU 32 times in 146 s: every check here took the adopted pages for device memory, so a BO there got no write-combined attribute
+ * and no cache maintenance, its command words stayed in CPU caches, and the CP read zeroed IBs (CP_HW_ERROR storms, [gpu stall] br ib1 0 0 ...). */
+bool NativeAdrenoKernelDram(uint64_t page)
+{
+    if(page>=gPhysBase && page-gPhysBase<gPhysSize)return true;
+    if(!&vm_outside_first_phys || !&vm_outside_last_phys || !&vm_outside_valid || !vm_outside_valid)return false;
+    const uint64_t first=vm_outside_first_phys,last=vm_outside_last_phys;
+    if(page<first || page>=last)return false;
+    const uint64_t index=(page-first)>>12;
+    return (__atomic_load_n(&vm_outside_valid[index/64],__ATOMIC_ACQUIRE)>>(index%64))&1;
+}
+static bool kernelDramRange(uint64_t physical,uint64_t bytes)
+{
+    for(uint64_t offset=0;offset<bytes;offset+=4096)if(!NativeAdrenoKernelDram(physical+offset))return false;
+    return true;
+}
 /* Time and bytes of every CPU cache maintenance pass (the board page shows them per submission), and the pages user BOs made
  * write-combined: [0] ticks, [1] bytes, [2] longest pass in ticks, [3] passes, [4] write-combined pages now. */
 extern "C" {volatile uint64_t native_adreno_cache_stats[5];}
@@ -27,7 +53,7 @@ bool NativeAdrenoPagesUncached(const NativeAdrenoPhysicalSpan *spans,size_t coun
         for(uint64_t offset=0;offset<spans[i].bytes;offset+=4096) {
             const uint64_t page=spans[i].physical+offset;
             /* Outside the kernel's DRAM (device memory such as the firmware framebuffer): never cached. */
-            if(page<gPhysBase || page-gPhysBase>=gPhysSize)continue;
+            if(!NativeAdrenoKernelDram(page))continue;
             /* Write-combined, device, posted and real-time attributes all carry VM_MEM_NOT_CACHEABLE; write-through does not. */
             if(!(pmap_cache_attributes((ppnum_t)(page>>12))&VM_MEM_NOT_CACHEABLE))return false;
         }
@@ -113,7 +139,7 @@ IOReturn NativeAdrenoMaintainPhysicalPages(uint64_t physical,size_t bytes,Native
              * uncached (kIOMapInhibitCache), no cache line of it exists to maintain, and phystokv would panic on it (int-080: illegal PA
              * 0xb8000000). */
             const uint64_t page=physical+offset;
-            if(page<gPhysBase || page-gPhysBase>=gPhysSize)continue;
+            if(!NativeAdrenoKernelDram(page))continue;
             const vm_offset_t alias=phystokv(page);
             if(!alias) {__asm__ volatile("dsb sy":::"memory");enable_preemption();return kIOReturnUnsupported;}
             for(uintptr_t address=alias,end=alias+4096;address<end;address+=line) {
@@ -141,7 +167,7 @@ IOReturn NativeAdrenoSetPagesCacheMode(const NativeAdrenoPhysicalSpan *spans,siz
     for(size_t i=0;i<count;++i) {
         const NativeAdrenoPhysicalSpan &span=spans[i];
         if(!span.bytes || ((span.physical|span.bytes)&4095) || span.physical>UINT64_MAX-span.bytes ||
-            span.physical<gPhysBase || span.physical+span.bytes-gPhysBase>gPhysSize)return kIOReturnBadArgument;
+            !kernelDramRange(span.physical,span.bytes))return kIOReturnBadArgument;
         pages+=span.bytes/4096;
     }
     for(size_t i=0;i<count;++i)
@@ -161,7 +187,7 @@ IOReturn NativeAdrenoReassertWriteCombined(const NativeAdrenoPhysicalSpan *spans
     for(size_t i=0;i<count;++i) {
         const NativeAdrenoPhysicalSpan &span=spans[i];
         if(!span.bytes || ((span.physical|span.bytes)&4095) || span.physical>UINT64_MAX-span.bytes ||
-            span.physical<gPhysBase || span.physical+span.bytes-gPhysBase>gPhysSize)return kIOReturnBadArgument;
+            !kernelDramRange(span.physical,span.bytes))return kIOReturnBadArgument;
         for(uint64_t offset=0;offset<span.bytes;offset+=4096) {
             const ppnum_t pn=(ppnum_t)((span.physical+offset)>>12);
             /* From the default attribute the pmap also cleans and invalidates the page (pmap_sync_wimg), so lines a cacheable view

@@ -132,7 +132,7 @@ static const OSMetaClass *lookup(const char *text)
 static void sheng_pmgr_publish(void)
 {
   unsigned mode = 0;
-  if (!PE_parse_boot_argn("sheng-pmgr", &mode, sizeof(mode)) || !mode) return;
+  if (!PE_parse_boot_argn("pmgr", &mode, sizeof(mode)) || !mode) return;
   sheng_pmgr_observation[15] = mode;
   sheng_pmgr_observation[1] = static_cast<uint32_t>(kIOReturnError);
   if (mode > 3 || sheng_pmgr_observation[0]) { sheng_pmgr_checkpoint(); return; }
@@ -231,7 +231,7 @@ extern "C" void sheng_pmgr_run(void)
 {
   sheng_pmgr_publish();
   unsigned mode = 0;
-  if (PE_parse_boot_argn("sheng-pmgr", &mode, sizeof(mode)) && mode == 2 && sheng_pmgr_observation[0] != 5)
+  if (PE_parse_boot_argn("pmgr", &mode, sizeof(mode)) && mode == 2 && sheng_pmgr_observation[0] != 5)
     panic("ShengPlatformPower: not published stage=%llu status=%llx parent=%llx own=%llx nub=%llx bound=%llx read=%llx/%llx state=%llx/%llx",
           sheng_pmgr_observation[0], sheng_pmgr_observation[1], sheng_pmgr_observation[2], sheng_pmgr_observation[3],
           sheng_pmgr_observation[5], sheng_pmgr_observation[6], sheng_pmgr_observation[7], sheng_pmgr_observation[8],

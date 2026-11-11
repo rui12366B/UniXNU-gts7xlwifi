@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Diagnostic log on UFS (boot argument sheng-log=1): every 2 s the text the board page would show (the diagnostic page, the live
+// Diagnostic log on UFS (boot argument log=1): every 2 s the text the board page would show (the diagnostic page, the live
 // banner, the GPU rows, a caught panic message) and the kernel message buffer are written to the last 32 MiB of userdata through
 // NativeUfs's bounded log window, so a run can be read back afterwards (scripts/read-sheng-log.py over the Linux log reader).
 //
@@ -184,13 +184,15 @@ extern volatile uint32_t native_orient_hid[5] __attribute__((weak_import));
 extern volatile uint32_t native_gyro_hid[5] __attribute__((weak_import));
 extern volatile uint32_t native_hid_gyro_status __attribute__((weak_import));
 extern volatile int t970_motion_log_status __attribute__((weak_import));
+extern volatile int32_t t970_ssc[8] __attribute__((weak_import));
+extern char t970_ssc_text[200] __attribute__((weak_import));
 extern volatile int32_t t970_orient[4] __attribute__((weak_import));
 extern volatile uint32_t native_hid_accel_status __attribute__((weak_import));
 extern volatile uint32_t native_hid_orient_status __attribute__((weak_import));
 extern volatile int32_t t970_camera[40] __attribute__((weak_import));
 extern volatile uint8_t t970_camera_thumb[64 * 48] __attribute__((weak_import));
 extern volatile int32_t t970_camera_ae[8] __attribute__((weak_import));
-extern volatile int32_t t970_camera_c5[12] __attribute__((weak_import));
+extern volatile int32_t t970_camera_c5[20] __attribute__((weak_import));
 // T970Bluetooth.cpp: stage/error/ids (see the file's header), and its start-up lines, '|' separated.
 extern volatile int32_t t970_bt[32] __attribute__((weak_import));
 extern char t970_bt_text[1024] __attribute__((weak_import));
@@ -273,6 +275,9 @@ extern volatile uint32_t nw_wifi_wr[512][3] __attribute__((weak_import));
 extern volatile uint32_t t970_qud_faults[16] __attribute__((weak_import));
 extern volatile int32_t t970_qud_phy[15] __attribute__((weak_import));
 extern volatile int32_t t970_qud_ss[12] __attribute__((weak_import));
+// QcomDwc3 SM8250 port (drivers/QcomDwc3/QcomDwc3Sm8250.cpp, t970-usb): field list at its definition.
+// A weak zero definition: the kernel links without libQcomDwc3.a, and the driver's strong one replaces it when present.
+__attribute__((weak)) volatile uint32_t t970_dwc3_stats[48];
 extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 extern volatile uint32_t native_touch_hid_multi[3] __attribute__((weak_import));
 extern volatile int32_t native_backlight_request[6] __attribute__((weak_import));
@@ -1080,6 +1085,22 @@ static size_t compose(char *out, size_t cap, uint32_t slot, unsigned now) {
       at = put(out, at, cap, row, sizeof row);
     }
   }
+  // Apple's USB device stack on the DWC3 (t970-usb): stage (12 = controller started; negative = the failed step), core ID, the
+  // hooks' call counts, and with t970-usb bit 2 the sampled link (seen: bit n = GDBGLTSSM state n; 0 U0, 4 SS.Disabled, 5 RxDetect).
+  if (t970_dwc3_stats[0] | t970_dwc3_stats[6]) {
+    const volatile uint32_t *u = t970_dwc3_stats;
+    char row[300];
+    snprintf(row, sizeof row, "[dwc3] st %d opt %x id %x gdsc %x smmu %x phy %x/%x hs %x irq %u on %u off %u rst %x dsts %x dcfg %x gctl %x "
+             "u2 %x start %u pm %x kext %x meta %x muic %x rails %x cable %u ident %x",
+             (int)u[0], u[6], u[1], u[5], u[7], u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15], u[16], u[17], u[18], u[19], u[20],
+             u[21], u[35], u[39], u[45], u[44], u[46]);
+    at = put(out, at, cap, row, sizeof row);
+    snprintf(row, sizeof row, "[dwc3 d] dsts %x dctl %x seen %x ltssm %x pipe %x dalep %x evcnt %x evsiz %x ep0 %x gfsr %x fsr %x far %x "
+             "ifc %u mux %u qmp %d pcs %x cc %x hw %x/%x/%x",
+             u[26], u[41], u[36], u[37], u[38], u[27], u[28], u[31], u[29], u[25], u[30], u[40], u[42], u[43], (int)u[32], u[33], u[34],
+             u[2], u[3], u[4]);
+    at = put(out, at, cap, row, sizeof row);
+  }
   if (&qcom_usb_debug_get_status) {
     static uint32_t st[128];
     char row[180];
@@ -1741,6 +1762,14 @@ static size_t compose(char *out, size_t cap, uint32_t slot, unsigned now) {
              hg ? hg[0] : 0, hg ? hg[1] : 0, hg ? hg[2] : 0, hg ? hg[3] : 0, hg ? hg[4] : 0,
              &t970_motion_log_status ? t970_motion_log_status : -2);
     at = put(out, at, cap, row, sizeof row);
+    // The sensor hub client (T970Sensors.cpp): QMI responses, report indications, events, last event msg id, SUID events, last SSC
+    // result, other QMI messages, lookups sent; then each SUID answer as type:count.
+    if (&t970_ssc && (t970_ssc[0] || t970_ssc[7])) {
+      const volatile int32_t *q = t970_ssc;
+      snprintf(row, sizeof row, "[sensors ssc] resp=%d ind=%d ev=%d last=%d suid=%d sns=%d other=%d asked=%d %.120s", (int)q[0], (int)q[1],
+               (int)q[2], (int)q[3], (int)q[4], (int)q[5], (int)q[6], (int)q[7], &t970_ssc_text ? t970_ssc_text : "");
+      at = put(out, at, cap, row, sizeof row);
+    }
     if (&t970_sensors_text && t970_sensors_text[0]) {
       snprintf(row, sizeof row, "[sensors] %.95s", t970_sensors_text);
       at = put(out, at, cap, row, sizeof row);
@@ -1757,7 +1786,7 @@ static size_t compose(char *out, size_t cap, uint32_t slot, unsigned now) {
   // C2a stream test words front/rear/wide (count1 | count2 << 8 | mode << 16 | rc << 24).
   if (&t970_camera && t970_camera[0]) {
     const volatile int32_t *c = t970_camera;
-    char row[240];
+    char row[288];
     snprintf(row, sizeof row, "[t970 camera] st %d det %x gdsc %x cci %x front %x rear %x wide %x irq %x ms %d sf %x sr %x sw %x",
              (int)c[0], (unsigned)c[1], (unsigned)c[2], (unsigned)c[3], (unsigned)c[4], (unsigned)c[5], (unsigned)c[6],
              (unsigned)c[7], (int)c[8], (unsigned)c[9], (unsigned)c[10], (unsigned)c[11]);
@@ -1784,9 +1813,10 @@ static size_t compose(char *out, size_t cap, uint32_t slot, unsigned now) {
     }
     if (&t970_camera_c5 && (t970_camera_c5[0] || t970_camera_c5[9])) {   // C5: streaming (bit 256), service (bit 512)
       const volatile int32_t *v = t970_camera_c5;
-      snprintf(row, sizeof row, "[t970 camera c5] st %x frames %d timeouts %d ms %d fps10 %d exp %x mean %d buf %x sites %08x svc %d uc %08x ae %d",
+      snprintf(row, sizeof row, "[t970 camera c5] st %x frames %d timeouts %d ms %d fps10 %d exp %x mean %d buf %x sites %08x svc %d uc %08x ae %d d %x %x %d %x p %x %x %d",
                (unsigned)v[0], (int)v[1], (int)v[2], (int)v[3], (int)v[4], (unsigned)v[5], (int)v[6], (unsigned)v[7], (unsigned)v[8],
-               (int)v[9], (unsigned)v[10], (int)v[11]);
+               (int)v[9], (unsigned)v[10], (int)v[11], (unsigned)v[12], (unsigned)v[13], (int)v[14], (unsigned)v[15],
+               (unsigned)v[16], (unsigned)v[17], (int)v[18]);
       at = put(out, at, cap, row, sizeof row);
     }
     if (c[28] >= 6 && &t970_camera_thumb) {   // the 64x48 thumbnail, one row of 128 hex digits per line (tools/camera-thumb.py)
@@ -2168,9 +2198,9 @@ static void writer(void *arg, wait_result_t result) {
   // can stop (state 3 on three failed rounds, state 4 on a GPT change, or blocked in a UFS write,
   // measured on boot 43ba9162) and the board still has to come back. This loop only reports that a
   // round landed, through log_sync_seq.
-  // sheng-diag-export=<seconds of log time>: export the diagnostic files once then (set it shortly before sheng-autoreset).
+  // diag-export=<seconds of log time>: export the diagnostic files once then (set it shortly before autoreset).
   uint32_t diag_at = 0;
-  if (&boot_diag_scan && &boot_diag_stream) PE_parse_boot_argn("sheng-diag-export", &diag_at, sizeof diag_at);
+  if (&boot_diag_scan && &boot_diag_stream) PE_parse_boot_argn("diag-export", &diag_at, sizeof diag_at);
   uint32_t errors = 0;
   boot_log_state = 2;
   for (;;) {
@@ -2220,14 +2250,14 @@ static void writer(void *arg, wait_result_t result) {
   }
 }
 
-// Called by the board page's monitor once a second; starts the writer the first time when sheng-log=1.
+// Called by the board page's monitor once a second; starts the writer the first time when log=1.
 void boot_log_tick(unsigned now) {
   if (!boot_log_started) {
     boot_log_started = 1;
     tick_first = now; tick_seen_at = now;
     // An unattended run must come back however it ends: on the desktop past its deadline (int-229 first suspected) or in a panic seconds
     // after the start, before UFS and this log exist (int-229: a duplicate class at PE_lockdown_iokit). So the first tick, independent of
-    // sheng-log, marks the cell (any restart is fastboot) and arms the hypervisor's watchdog, which bites a minute after the pings stop:
+    // log=1, marks the cell (any restart is fastboot) and arms the hypervisor's watchdog, which bites a minute after the pings stop:
     // after the autoreset deadline, or when a panic parks the cores.
     uint32_t autoreset = 0;
     // The probe is called for its text, not for a verdict: what the cell held at boot is worth
@@ -2236,14 +2266,14 @@ void boot_log_tick(unsigned now) {
     // accepts, this handset leaves 0x4ab2b0e2 in it, so the mark, the PON write and the reset were
     // skipped on every boot (boot-usb101, 273 rounds, known=0). Whether the cell held an old reason
     // says nothing about whether it can be overwritten.
-    if (PE_parse_boot_argn("sheng-autoreset", &autoreset, sizeof autoreset) && autoreset) {
+    if (PE_parse_boot_argn("autoreset", &autoreset, sizeof autoreset) && autoreset) {
       tick_autoreset = autoreset;
       if (&boot_reset_probe) (void)boot_reset_probe(boot_log_reset_probe_text, sizeof boot_log_reset_probe_text);
       if (&boot_reset_mark_bootloader) boot_reset_mark_bootloader(boot_log_reset_mark, sizeof boot_log_reset_mark);
       if (&boot_reset_watchdog) boot_reset_watchdog(autoreset + 60, boot_log_reset_watchdog, sizeof boot_log_reset_watchdog);
     }
     uint32_t mode = 0;
-    if (PE_parse_boot_argn("sheng-log", &mode, sizeof mode) && mode == 1 &&
+    if (PE_parse_boot_argn("log", &mode, sizeof mode) && mode == 1 &&
         &native_ufs_log_open && &native_ufs_log_write && &native_ufs_log_sync) {
       boot_log_buffer = (uint8_t *)IOMallocAligned(LogMsgBlocks * LogBlock, LogBlock);
       if (boot_log_buffer) {

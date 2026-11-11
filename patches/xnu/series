@@ -15,3 +15,5 @@ t970-shutdown-failsafe.patch
 t970-audio-addon-mount.patch
 t970-wifi-service-mount.patch
 t970-union-ro-create.patch
+t970-memory-outside.patch
+t970-union-statfs-fsid.patch

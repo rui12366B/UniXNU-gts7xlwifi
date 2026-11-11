@@ -76,8 +76,11 @@ extern "C" {volatile int32_t t970_camera[40]; volatile uint8_t t970_camera_thumb
 // for 2 buffers) | sessions << 8, [1] frames, [2] frame timeouts, [3] ms streamed, [4] frames per 10 s, [5] coarse | gain << 16 at
 // the end, [6] last AE mean, [7] buffers | buffer KiB << 8, [8] MSB means of the four Bayer sites of the last frame, (y0 x0) |
 // (y0 x1) << 8 | (y1 x0) << 16 | (y1 x1) << 24, [9] service (T970CameraService.cpp; 1 published), [10] user clients opens |
-// starts << 8 | maps << 16 | closes << 24, [11] AE changes while streaming.
-extern "C" {volatile int32_t t970_camera_c5[12];}
+// starts << 8 | maps << 16 | closes << 24, [11] AE changes while streaming, [12..15] user-space status words (T970CameraReport;
+// tools/t970camerad: [12]/[13] the stage bits of its two identities, [14] frames sent to CoreMediaIO, [15] last error, [16] its
+// AVFoundation probe's stage bits, [17] devices listed (total | built-in << 8 | external << 16 | ours << 24), [18] frames the
+// probe's AVCaptureVideoDataOutput received, [19] reserved).
+extern "C" {volatile int32_t t970_camera_c5[20];}
 extern kmod_info_t g_kernel_kmod_info;
 extern "C" void t970_camera_service_static_init(void) __asm__("__GLOBAL__sub_I_T970CameraService.cpp");
 extern "C" void t970_camera_service_start(void);
@@ -1087,6 +1090,11 @@ extern "C" int t970_camera_request(uint32_t selector, uint32_t a, uint32_t b) {
         gManExp = a; gManGain = b;
         gCtl->manual_exposure = a; gCtl->manual_gain = b;
         __atomic_store_n(&gManualDirty, 1u, __ATOMIC_RELEASE);
+        return 0;
+    }
+    if (selector == T970CameraReport) {
+        if (a > 7) return 2;
+        t970_camera_c5[12 + a] = int32_t(b);
         return 0;
     }
     if (selector != T970CameraStart) return 2;

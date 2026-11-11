@@ -138,7 +138,7 @@
  #include <sys/kdebug.h>
  
  
-@@ -1227,12 +1228,44 @@
+@@ -1227,12 +1228,46 @@
  	return error;
  }
  
@@ -155,6 +155,8 @@
 +		"/private/var/ngpu/wifi-bin/unixnu-wpa_supplicant",
 +		"/private/var/ngpu/bt-bin/BlueTool",
 +		"/private/var/ngpu/bt-bin/bluetoothd",   /* the BT session's bluetoothd with in-memory root keys (keychain -25291) */
++		"/private/var/ngpu/cam-bin/t970camerad",       /* camera stage C6: CoreMediaIO camera extension (scripts/build-t970camerad.py) */
++		"/private/var/ngpu/cam-bin/t970camerad-uvc",   /* the same daemon under the UVC extension identity */
 +	};
 +	uint32_t service = 0;
 +	char path[64];
@@ -213,7 +215,7 @@
  mac_proc_check_launch_constraints(proc_t curp, struct image_params *imgp, os_reason_t *reasonp)
  {
  	uint32_t skip = 0;
- 	if (PE_parse_boot_argn("sheng-no-lc", &skip, sizeof(skip)) && skip != 0) {
+ 	if (PE_parse_boot_argn("no-lc", &skip, sizeof(skip)) && skip != 0) {
 +		return 0;
 +	}
 +	/* gts7xlwifi: the board's owner services at their exact Data paths (security/mac_vfs.c t970_service_exec_exempt, t970-wifi-svc=1). */

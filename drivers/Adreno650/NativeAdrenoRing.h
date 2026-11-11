@@ -215,6 +215,8 @@ public:
     /* a6xx_bus_clear_pending_transactions without the GX side: GBIF client requests halted, then all AXI requests, each until its
      * acknowledge or a bounded spin, then the halt cleared. ack[0] and ack[1] are the acknowledge words (bit 0 client, bit 1 arbiter). */
     IOReturn drainBus(uint32_t *ack);
+    /* gts7xlwifi gpufault6: RBBM_STATUS GPU_BUSY_IGN_AHB (bit 23): the GPU is still executing (false when the read fails). */
+    bool gpuBusy();
     /* The CP_INDIRECT_BUFFER packet that ends just before ring index rptr (what a thread whose read pointer is rptr executes): its GPU
      * address and size in dwords. kIOReturnUnsupported when the words there are not that packet. */
     IOReturn ibBefore(uint32_t rptr,uint64_t *iova,uint32_t *dwords) const;

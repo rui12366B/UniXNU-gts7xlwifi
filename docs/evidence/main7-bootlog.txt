@@ -1,0 +1,12 @@
+# main7b (UniXNU main 62be7bc + docs/host-patches), selected boot-log rows; addresses and identifiers removed
+MEM totalMiB=6733 free4K=1340807 active=16868 inactive=16737 wired=185980 speculative=130
+[dwc3] st 12 opt 5 id 33313130 gdsc f822f000 smmu fc4805 phy b8b8b8b8/0 hs 0 irq 2802 on 1 off 1 rst 0 dsts d20e04 dcfg 80800 gctl 102000 u2 102400 start 1 pm 8 kext 0 meta 1 muic 100f8 rails 0 cable 1
+[dwc3 d] dsts d29a61 dctl 600000 seen 8 ltssm 9cc20006 pipe 30c1002 dalep 0 evcnt 0 evsiz 80000800 ep0 908 gfsr 0 fsr 400 far 9745c5ea ifc 1 mux 1 qmp 0 pcs 0 cc 0 hw 4020400a/10420086/8a00d86
+[t970 pen] st 5 err 0 pins 674f fw 403d mpu 30345 max 26712/16714/4095 tilt ff3f3f pk 2456 co 2455 oth 1 types 2002 i2c 0 stuck 0 xy 24839,3865 p 0 tilt 55f035 fl 81 pdct 0/0 hall 1 hov 5 tip 13 side 0 rate e80000 sink 2455 q 1 ldo 1 bits 3807 t 335 hid 1/2/2455/0/0/0
+force wrapper on x1000
+[sensors] st=14 err=0 irq=64 slave=6 items=4300 qmp=0 fw=7272K rdy=130ms rx=56 tx=28 ch=4001 unk=3 qrtr=14 node=b0009 sns=9000b req=10000000
+[sensors hid] accel=1/2/1635/0/1/0 orient=1/2/1/0/1/0 now=1 changes=1 sent=1 at=14005ms
+[t970 bt sk] st 2 res 0 act 2/1/1/1 h2c 2401 c2h 2458
+# combo23 (microphone)
+[audio mic] st=11/0 start=4 stop=4 reads=1847/1847/0 frames=878880 peak=6941 resync=0 path=24 dmic=5 id=0 afe=0 copp=9 pos=-1411 ldo=0
+# combo25 (Wi-Fi data path)

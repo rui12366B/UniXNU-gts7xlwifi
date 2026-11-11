@@ -133,8 +133,8 @@ fw_obj = OUT / 'AdspFirmware.o'
 fw_command = [str(fw_source) if arg == str(policy_source) else str(fw_obj) if arg == str(policy_obj) else arg for arg in policy_command]
 subprocess.run(fw_command, cwd=policy_record['directory'], check=True, timeout=90)
 
-# The UFS diagnostic log writer (boot argument sheng-log=1) and the guarded fastboot reset
-# (sheng-autoreset=<seconds>). BootLog.c reaches the board only through weak imports, so the
+# The UFS diagnostic log writer (boot argument log=1) and the guarded fastboot reset
+# (autoreset=<seconds>). BootLog.c reaches the board only through weak imports, so the
 # sheng copy is used unchanged; BootReset.c is this board's own (IMEM, not the SPMI arbiter).
 log_source = PACKAGE / 'BootLog.c'
 log_obj = OUT / 'BootLog.o'

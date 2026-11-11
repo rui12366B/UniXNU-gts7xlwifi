@@ -32,9 +32,11 @@
 //   1024 separate device only: no DigitizerCollectionDispatch (the stylus event on its own instead of as a collection's child)
 //   2048 the old separate HID pen device (HidInputProbe.cpp, combo23/24b) instead of the touch device's report
 //   4096 separate device only: application collection Stylus (0x20), backboardd's pencil digitizer pair (0x0D/0x20)
+//   8192 separate device only: keyboard collection first (like the working touch device), stamped to 0x0D/0x20 (or 1)
 // t970-pen-xform=<bits>: 1 swap the raw axes, 2 mirror x, 4 mirror y, applied to the raw sensor axes before scaling to the frame
-// buffer (2800 x 1752 landscape). Default 4: the raw x axis is the long one; Android applies y-invert + xy-switch to reach its portrait
-// natural orientation, and the touch core's frame buffer mapping is that portrait space swapped back, so only y stays mirrored.
+// buffer (2800 x 1752 landscape). Default 0: the raw axes already match the frame buffer (raw x along the long side, raw y down).
+// main3 (default was 4, from Android's y-invert + xy-switch and the touch core's swap) put the pen point mirrored top/bottom on the
+// device; the user confirmed a vertical flip is right, so Android's y-invert does not carry over to this frame buffer.
 // t970-pen-i2c=<us>: half clock period in microseconds (default 4, about 120 kHz).
 #include <IOKit/IOLib.h>
 #include <IOKit/IODeviceMemory.h>
@@ -103,7 +105,7 @@ Region regions[] = {
 
 void (*gSink)(void *, uint64_t) = nullptr;
 void *gSinkContext = nullptr;
-unsigned gBits, gXform = 4, gHalf = 4;
+unsigned gBits, gXform = 0, gHalf = 4;
 uint64_t gFrequency, gEpoch;
 
 uint64_t now() {uint64_t n; __asm__ volatile("isb\n\tmrs %0,cntpct_el0" : "=r"(n)); return n;}
@@ -309,6 +311,9 @@ void coordinate(const uint8_t *d) {
     if (gXform & 2) {fx = 32767 - fx; tx = -tx;}
     if (gXform & 4) {fy = 32767 - fy; ty = -ty;}
     gLastFx = fx; gLastFy = fy;
+    // The first tip-downs as frame-buffer pixels (2800 x 1752 landscape, the units of the [t970 touch] xy field), raw too: a pen tap
+    // and a finger tap on the same spot must match (main2: backboardd delivered 3 pencil taps to Preferences, nothing visibly hit).
+    if (tip && !gTip && t970_pen[kTips] <= 12) note("tip %u,%u px raw %u,%u", fx * 2800 / 32768, fy * 1752 / 32768, rx, ry);
     // The first packet in range only marks proximity in Samsung's handler; the stylus gets it as hover with the position.
     const unsigned pressure = gMaxP ? (unsigned)((uint64_t)(p > gMaxP ? gMaxP : p) * 4095 / gMaxP) : 0;
     toSink(pack(fx, fy, tip ? pressure : 0, tx, ty, tip, side, true, rubber));
@@ -420,6 +425,8 @@ void worker(void *, wait_result_t) {
 }
 }  // namespace
 
+// A line from the HID side (NativeHidInput: which driver took the separate pen device, and who opened it) into [t970 pen log].
+extern "C" void t970_pen_note(const char *line) {if (line) note("%s", line);}
 extern "C" void native_pen_set_sink(void (*sink)(void *, uint64_t), void *context) {
     gSinkContext = context;
     __atomic_store_n(&gSink, sink, __ATOMIC_RELEASE);

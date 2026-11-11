@@ -3,7 +3,7 @@
 
   t970-addon-add.py ADDON PATH=CONTENT [PATH=CONTENT ...]
 
-PATH is relative to /private/var/ngpu (the kernel writes each addon file there before its addon mount, sheng-gpu-addon=1), CONTENT
+PATH is relative to /private/var/ngpu (the kernel writes each addon file there before its addon mount, gpu-addon=1), CONTENT
 the file's text (an empty value makes an empty file), or @FILE for a local file's bytes (firmware). gts7xlwifi uses it for the AdrenoMetal diagnostic switches under debug/
 (NativeBridgeMetalFrontend.mm reads /private/var/ngpu/debug/<name> when a process starts), which make-gpu-addon.py has no option for.
 Layout as make-gpu-addon.py writes it: "NGPUADD2", u32 count, u32 0, u64 total bytes; per file u32 path bytes (with its NUL), u32 mode,

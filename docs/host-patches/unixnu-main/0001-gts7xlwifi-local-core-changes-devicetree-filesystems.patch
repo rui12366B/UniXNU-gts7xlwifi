@@ -1,0 +1,43 @@
+From 34589dff3e32f14e719b9cafd6dbf341b881e24a Mon Sep 17 00:00:00 2001
+From: gts7xlwifi port <gts7xlwifi@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 06:01:28 +0000
+Subject: [PATCH 1/3] gts7xlwifi: local core changes (devicetree filesystems,
+ data volume check, frame-diagnostics patch header)
+
+---
+ scripts/unixnu/devicetree.py | 3 ++-
+ scripts/unixnu/payload.py    | 4 +++-
+ 2 files changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/scripts/unixnu/devicetree.py b/scripts/unixnu/devicetree.py
+index 3dde210..3027603 100644
+--- a/scripts/unixnu/devicetree.py
++++ b/scripts/unixnu/devicetree.py
+@@ -412,7 +412,8 @@ def generate(dtb, config, *, unique_chip_id=None, data=False, trust=False, addon
+     children.append(node('arm-io', [('device_type', b'arm-io\0'), ('#address-cells', struct.pack('<I', 2)),
+                          ('#size-cells', struct.pack('<I', 2)), ('ranges', struct.pack('<QQQ', 0, base, size))],
+                          [node(name, hardware_properties(entry, handles, base)) for name, entry in zip(names, hardware)]))
+-    for name in ('defaults', 'options', 'product', 'buttons'):
++    # filesystems: APFS reads /filesystems/DoNotUseSEP (the original no-SEP switch) before its unencrypted-Data guard.
++    for name in ('defaults', 'options', 'product', 'buttons', 'filesystems'):
+         if name in platform or name in ('defaults', 'options', 'product'):
+             children.append(platform_node(name, platform.get(name, {})))
+     # A configured root 'compatible' goes before the hardware DTS's own entries: an OS identity's board name comes first (the OS
+diff --git a/scripts/unixnu/payload.py b/scripts/unixnu/payload.py
+index 4dcbfdc..f22a99a 100644
+--- a/scripts/unixnu/payload.py
++++ b/scripts/unixnu/payload.py
+@@ -49,7 +49,9 @@ def check_data_input(ctx, data):
+         selected = ctx.device / 'configs' / ctx.config_name
+         if selected.is_file():
+             config = parse_config(selected.read_text())
+-    if config.get('XNU_OWNER_DATA_MOUNT'):
++    # gts7xlwifi: a board whose Data is a volume on its own storage (CONFIG_XNU_STORAGE_DATA_VOLUME, the T970's APFS image on
++    # sda40 mounted by its own patch) publishes no RAM seed, so it has none to pass.
++    if config.get('XNU_OWNER_DATA_MOUNT') and not config.get('XNU_STORAGE_DATA_VOLUME'):
+         raise Error('CONFIG_XNU_OWNER_DATA_MOUNT requires --data-ramdisk FILE (or [build] data_ramdisk); '
+                     'persistent Data still needs its original seed to publish the volume')
+ 
+-- 
+2.54.0 (Apple Git-157)
+

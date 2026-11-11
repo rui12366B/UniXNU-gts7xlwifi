@@ -30,7 +30,7 @@
 //      rounds of the user-client path from the kernel (open, BOs, an IB of three CP_MEM_WRITEs, its fence, close); then a row
 //      every 2 s with the interrupts, fence waits, submissions and user clients, and the CP's state once it stops moving.
 //  12  as 11, then the staged accelerator for the original Metal discovery (UniXNU-sheng's publishMetal, UniXNU-tb128fu's
-//      naMetal); the Metal plugin and Turnip come from the GPU addon (sheng-gpu-addon=1) and the owner trust module.
+//      naMetal); the Metal plugin and Turnip come from the GPU addon (gpu-addon=1) and the owner trust module.
 // The rows below go to the kernel log whenever they change (BootRamoops.c). The sequence starts 5 s after the late probe, so the
 // display and the log thread already run if a read hangs the bus. Modes 1-12 ran on the tablet on 2026-10-24; until APRIV was set
 // every UCHE read ended in UCHE_OOB_ACCESS and Metal's frames were all zero (see the README).
@@ -1334,7 +1334,7 @@ bool selfTest() {
 }
 
 // Mode 12: the staged AGXAccelerator for the original Metal discovery (sheng publishMetal, UniXNU-tb128fu naMetal). The plugin
-// bundle arrives through the boot-time addon mount (sheng-gpu-addon=1) and the owner trust module; the render server is the one
+// bundle arrives through the boot-time addon mount (gpu-addon=1) and the owner trust module; the render server is the one
 // process granted its client, with the two that crashed in CoreImage's OpenGL ES path without a Metal device on UniXNU-tb128fu.
 #if PIPA_GPU_ACCELERATOR
 bool metal() {
@@ -1366,7 +1366,9 @@ bool metal() {
     if (!accelerator) return stop(kIOReturnNoMemory);
     if (!accelerator->init()) {accelerator->release(); return stop(kIOReturnError);}
     accelerator->setProperty("MetalPluginName", "NativeAdrenoMetal");
-    accelerator->setProperty("NativeSandboxGrantProcess", "backboardd,iconservicesagent,Preferences,CollectionsPoster");
+    // main2a: MobileNotes (PencilKit) is in neither list, so its GPU open was refused ("Sandbox: MobileNotes deny(1) iokit-open-user-client
+    // AGXDeviceUserClient") and the main userspace handed PencilKit a nil paint_kernel: Metal's setComputeFunction: validation aborted it.
+    accelerator->setProperty("NativeSandboxGrantProcess", "backboardd,iconservicesagent,Preferences,CollectionsPoster,MobileNotes");
     // periph14: and every process signed for Metal (wallpaper posters, widget renderers), as SM-T733 does (t970-sandbox-grant-entitlement.patch).
     accelerator->setProperty("NativeSandboxGrantEntitlement", "com.apple.security.ts.opengl-or-metal,com.apple.posterkit.provider");
     accelerator->setProperty("MetalPluginClassName", "NativeAdrenoMetalDevice");
@@ -1563,19 +1565,19 @@ const char *asidName(uint32_t asid) {
 // gpufault2: and the submissions the kernel refused with anything but Busy (each one loses that client's Vulkan device: Turnip's
 // "submit failed", which made the render server end itself in combo8b) and the table switches that answered Busy after 2 s.
 extern "C" {extern volatile uint32_t native_t970_submit_fail[5]; extern volatile uint32_t native_t970_usevm_busy[2];
-    extern volatile uint32_t native_t970_stale_submit[5];
+    extern volatile uint32_t native_t970_stale_submit[5]; extern volatile uint32_t native_t970_drain_skipped[2];
     extern volatile uint32_t native_adreno_recover_trace[4];}
 bool faultRow(char *line, size_t cap) {
     const uint32_t *f = native_t970_gpu_fault, *r = native_t970_gpu_restart;
     const volatile uint32_t *sf = native_t970_submit_fail;
     const volatile uint32_t *ds = native_t970_stale_submit;
-    if (!f[0] && !r[0] && !sf[0] && !native_t970_usevm_busy[0] && !ds[0]) return false;
+    if (!f[0] && !r[0] && !sf[0] && !native_t970_usevm_busy[0] && !ds[0] && !native_t970_drain_skipped[0]) return false;
     char name[12];
     strlcpy(name, f[0] ? asidName(f[7]) : "-", sizeof name);
     // Most useful first: the row is cut at 119 characters.
-    snprintf(line, cap, "FAULTS n%u %x@%x%08x s%x/%x pf%x a%u %s t%u|sf %u %x:%u p%u h%x|ds %u p%u h%x|rs %u/%u %u:%x|vb %u|pz %u:%x|1st %x%08x a%u",
+    snprintf(line, cap, "FAULTS n%u %x@%x%08x s%x/%x pf%x a%u %s t%u|sf %u %x:%u p%u h%x|ds %u p%u h%x|rs %u/%u %u:%x|vb %u dk %u|pz %u:%x|1st %x%08x a%u",
              f[0], f[1], f[3], f[2], f[4], f[5], f[6], f[7], name, f[8], sf[0], sf[1], sf[3], sf[2], sf[4], ds[0], ds[3], ds[1], r[4], r[0],
-             r[1], r[2], native_t970_usevm_busy[0], native_adreno_recover_trace[0], native_adreno_recover_trace[1], f[10], f[9], f[11]);
+             r[1], r[2], native_t970_usevm_busy[0], native_t970_drain_skipped[0], native_adreno_recover_trace[0], native_adreno_recover_trace[1], f[10], f[9], f[11]);
     return true;
 }
 

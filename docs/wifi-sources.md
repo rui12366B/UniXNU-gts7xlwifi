@@ -295,7 +295,7 @@ combo15a→15b, 2026-11-09: on the same int31 kernel, a boot that rewrote the ad
 none of the cache files booted with the mount at stage 5. That confirms the defer of int32. The supplicant then passed the Sandbox exec
 check, but AMFI refused it: "Launch Constraint Violation ... c[8]p[1]m[1]e[6] (Constraint not matched)", relaunched every ~3 s. An
 owner-trusted binary has no platform constraint category. UniXNU's zzyc-owner-skip-launch-constraints.patch is in the kernel, but only as
-the global boot argument sheng-no-lc=1. int33: t970_service_exec_exempt() in mac_vfs.c (exact paths
+the global boot argument no-lc=1. int33: t970_service_exec_exempt() in mac_vfs.c (exact paths
 /private/var/ngpu/wifi-bin/unixnu-wpa_supplicant and /private/var/ngpu/bt-bin/BlueTool, t970-wifi-svc=1) now also returns early from
 mac_proc_check_launch_constraints. The patch is rebased on the live xnu-work (it carries the MG marker bump) and test-compiled with
 -Wall -Wmissing-prototypes.
@@ -440,5 +440,36 @@ confirmed.
 - **Safari:** loads nothing because AMFI kills its web content process at launch (kernel msgbuf, pids 362 and 363):
   `Launch Constraint Violation (enforcing) ... c[1]p[1]m[1]e[4] (Constraint not matched)` for
   `/System/Library/ExtensionKit/Extensions/WebContentExtension.appex/com.apple.WebKit.WebContent`. News uses NSURLSession in its own
-  process, so it works. The kernel already has the global off switch `sheng-no-lc=1` (zzyc-owner-skip-launch-constraints.patch). A
+  process, so it works. The kernel already has the global off switch `no-lc=1` (zzyc-owner-skip-launch-constraints.patch). A
   targeted fix would exempt this one path in `mac_proc_check_launch_constraints`.
+
+### combo26 (no-lc=1): Safari loads pages; signal bars still 0, 2026-11-09
+
+wifid got no link-quality event at all: no `LQAManager LQM Event`, no `received LQM update` in the combo26 log. The source is 21H461's
+IO80211.framework `__dispatchlqmChangedEvent`. It needs at least 0xb8 bytes and builds the LQM dictionary from flagged fields:
+- byte 0 → `RSSI` (int32 at +4);
+- byte 8 → `PER_CORE_RSSI` (int8 at +9 and +10, 0x80 means none);
+- byte 0xb → `SNR` (int16 at +0xc);
+- byte 0xe → `NOISE` (int16 at +0x10).
+
+The counters at +0x14..+0x44 (TXFAIL and the others) are always read. Optional blocks follow at 0x12, 0x30, 0x31, 0x50, 0x62
+(ROAM_STATE), 0xa0 (CCA_STATS) and 0xb4. It then calls the client back with event 39 = `APPLE80211_M_RSSI_CHANGED`, which wifid
+monitors. The driver never sent it.
+
+Fix: `post_rssi()` posts event 39 with RSSI, per-chain RSSI, SNR and noise (184 bytes). It runs after each successful join and on every
+signal change of 3 dB or more. With the 16-byte name and the 24-byte header the kernel event is 224 bytes; MLEN on this kernel
+(no mcache) is 288, measured with the kernel headers. `t970-wifi-lqm=0` turns it off. Expected in the next log: `wifi-net: event 39
+bytes 184 -> 0`, then wifid `LQAManager LQM Event`, then SpringBoard `signal strength bars changed to` a non-zero value.
+
+### Rebase onto UniXNU main (62be7bc, worktree sources/UniXNU-main), 2026-11-11
+
+- `t970-wifi-service-mount.patch` failed at `security/mac_process.c:898`. Upstream renamed the launch-constraint switch in
+  zzyc-owner-skip-launch-constraints.patch from `sheng-no-lc` to `no-lc`, and the hunk had that line as context. Only the context line
+  changed; the patch adds no `sheng-` reads of its own. On the new base `no-lc=1` replaces `sheng-no-lc=1`, which Safari's web content
+  process needs.
+- `t970-union-ro-create.patch` applies unchanged and is still needed. Upstream ee54dcd (`native-union-statfs-fsid.patch`, arm64e series
+  only) and 9b80600 (`macos-union-one-volume.patch`, macOS profile only) are not in this board's series. Both fix fsid and device-id
+  reporting for the root union, not the lookup that answers EROFS for an entry that exists only in the covered layer.
+- Real build: all 78 patches applied and every kernel object compiled. The bootstrap pass stopped at its intended link without the
+  archives. The archive builds then stopped at archive-19 (`build-gop-legacy-display.py`), which needs this board's previous kernel at
+  `out/.../kernel/kernel.macho`, and a fresh out/ has none.

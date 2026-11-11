@@ -184,6 +184,13 @@ IOReturn NativeAdrenoRing::kick()
     if(io_.barrier(io_.cookie))return poison();
     return writeWptr(next_);
 }
+bool NativeAdrenoRing::gpuBusy()
+{
+    enum : uint32_t {RbbmStatus=0x0210,GpuBusyIgnAhb=1u<<23};
+    uint32_t status=0;
+    if(!attached_ || io_.read32(io_.cookie,RbbmStatus,&status))return false;
+    return (status&GpuBusyIgnAhb)!=0;
+}
 IOReturn NativeAdrenoRing::drainBus(uint32_t *ack)
 {
     enum : uint32_t {GbifHalt = 0x3c45, GbifHaltAck = 0x3c46, ClientHalt = 1u, ArbHalt = 2u};

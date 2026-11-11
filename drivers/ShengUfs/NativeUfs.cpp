@@ -1219,9 +1219,9 @@ static uint32_t be32w (const uint8_t *at)
 
 }
 
-// ---- Persistent Data store window (sheng-data-persist) ----------------------------------------------------------
+// ---- Persistent Data store window (data-persist) ----------------------------------------------------------
 // The only part of this driver that ever writes. The consumer (NativeRamBlock's overlay) asks for a window of the given
-// size at the END of the userdata partition. Mode 1 (boot argument sheng-data-persist=1) only reads: it proves the window and
+// size at the END of the userdata partition. Mode 1 (boot argument data-persist=1) only reads: it proves the window and
 // lets the consumer inspect its header. Mode 2 additionally opens the write window. A window is refused unless it lies inside
 // the partition, clear of the flashed root image plus a 4 MiB guard, and is at most a quarter of the partition.
 namespace {
@@ -1233,14 +1233,14 @@ struct StoreGeometry {
 };
 StoreGeometry gStoreGeometry;
 uint64_t gStoreRegionFirst, gStoreRegionBlocks;
-// The diagnostic log (sheng-log=1): always the last 32 MiB of userdata, so the Data store's place does not depend on logging.
+// The diagnostic log (log=1): always the last 32 MiB of userdata, so the Data store's place does not depend on logging.
 constexpr uint64_t kLogReserveBlocks = 8192;
 // The log's export region: the 256 MiB just below the log window (the render server's pipeline caches, kits/sheng BootLog.c). It is
 // part of the log's write window, so the store ends below both.
 constexpr uint64_t kExportBlocks = 65536;
 uint64_t gLogRegionFirst, gLogRegionBlocks;
-// The reserve at the end of userdata that the Data store stays clear of: the log and its export region sit inside it (sheng-log=1), the rest
-// is unused. sheng-log-reserve=<MiB>, default 1024; 0 gives all the room to Data and is only accepted with the log off. The store's place
+// The reserve at the end of userdata that the Data store stays clear of: the log and its export region sit inside it (log=1), the rest
+// is unused. log-reserve=<MiB>, default 1024; 0 gives all the room to Data and is only accepted with the log off. The store's place
 // depends on it, so an image keeps one value for its whole life (a different value moves the store: the old one is read as blank).
 constexpr uint32_t kDefaultReserveMiB = 1024;
 static uint64_t reserveBlocks (void)
@@ -1248,7 +1248,7 @@ static uint64_t reserveBlocks (void)
   static int64_t cached = -1;
   if (cached < 0) {
     uint32_t mib = kDefaultReserveMiB;
-    if (!PE_parse_boot_argn ("sheng-log-reserve", &mib, sizeof (mib)) || mib > 16384) mib = kDefaultReserveMiB;
+    if (!PE_parse_boot_argn ("log-reserve", &mib, sizeof (mib)) || mib > 16384) mib = kDefaultReserveMiB;
     cached = static_cast<int64_t> (mib) * 256;   // 4096-byte blocks
   }
   return static_cast<uint64_t> (cached);
@@ -1259,7 +1259,7 @@ static unsigned storeMode (void)
   static int cached = -1;
   if (cached < 0) {
     uint32_t value = 0;
-    if (!PE_parse_boot_argn ("sheng-data-persist", &value, sizeof (value)) || value > 2) value = 0;
+    if (!PE_parse_boot_argn ("data-persist", &value, sizeof (value)) || value > 2) value = 0;
     cached = static_cast<int> (value);
   }
   return static_cast<unsigned> (cached);
@@ -1337,7 +1337,7 @@ extern "C" int native_ufs_store_sync (void)
   return storeMode () == 2 && gStoreRegionBlocks && hostSyncCache () == kIOReturnSuccess;
 }
 
-// ---- Diagnostic log window (sheng-log=1) --------------------------------------------------------------------------
+// ---- Diagnostic log window (log=1) --------------------------------------------------------------------------
 // The board's log writer (kits/sheng BootLog.c) gets the last kLogReserveBlocks of userdata and the kExportBlocks below them, refused
 // unless the partition holds them clear of the flashed root image plus a 4 MiB guard. Off without the boot argument.
 static unsigned logMode (void)
@@ -1345,7 +1345,7 @@ static unsigned logMode (void)
   static int cached = -1;
   if (cached < 0) {
     uint32_t value = 0;
-    if (!PE_parse_boot_argn ("sheng-log", &value, sizeof (value)) || value > 1) value = 0;
+    if (!PE_parse_boot_argn ("log", &value, sizeof (value)) || value > 1) value = 0;
     cached = static_cast<int> (value);
   }
   return static_cast<unsigned> (cached);

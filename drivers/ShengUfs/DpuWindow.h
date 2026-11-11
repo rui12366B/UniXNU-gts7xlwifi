@@ -202,8 +202,8 @@ static int dpuWindowBuildImpl (uintptr_t smmu)
   if (!smmu) return 0;
   if (native_ufs_dpu_state >> 31) return 1;                       // already built
   uint32_t dpu = 0, scanout = 0;
-  PE_parse_boot_argn ("sheng-dpu", &dpu, sizeof (dpu));
-  PE_parse_boot_argn ("sheng-dpu-scanout", &scanout, sizeof (scanout));
+  PE_parse_boot_argn ("dpu", &dpu, sizeof (dpu));
+  PE_parse_boot_argn ("dpu-scanout", &scanout, sizeof (scanout));
   if (dpu < 2 && !scanout) return 0;                              // the board did not ask for it
   uint32_t s1 = 0x820, s2 = 0x821;
   PE_parse_boot_argn ("native-dpu-stream", &s1, sizeof (s1));

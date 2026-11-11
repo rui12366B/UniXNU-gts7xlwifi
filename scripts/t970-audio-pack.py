@@ -4,7 +4,7 @@
   t970-audio-pack.py ADDON_IN ADDON_OUT TRUST_IN TRUST_OUT [HALDIR]
 
 HALDIR is scripts/build-t970-audio-hal.py's output (default .cache/audio-hal): its stage/ directory goes into the addon under audio/
-(the kernel writes it to /private/var/ngpu/audio and mounts it over /System/Library/Audio/Plug-Ins/HAL, sheng-gpu-addon=1), and its
+(the kernel writes it to /private/var/ngpu/audio and mounts it over /System/Library/Audio/Plug-Ins/HAL, gpu-addon=1), and its
 trust.json CDHash is appended to the trust bundle as one more owner module (UniXNU scripts/trust-append-module.py), as UniXNU-sheng's
 scripts/pack27-gpu.sh does. Uses UniXNU's scripts/addon-add-dir.py and trust-append-module.py from ../sources/UniXNU-next."""
 import json

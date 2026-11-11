@@ -391,7 +391,7 @@ __attribute__((noinline)) void native_legacy_transfer_observed(IOReturn status, 
 
 // The raster hand-off: offer each swapped frame to the GOP presenter, which hands it to the GPU
 // client for the copy. This was a stub that declined every offer, so the display kept its CPU copy
-// path and GPUFRAME read "gpu offered 0" no matter what sheng-fb-gpu said. Note the arity: the
+// path and GPUFRAME read "gpu offered 0" no matter what fb-gpu said. Note the arity: the
 // display driver calls this with six arguments, so a five-argument stub still linked under C
 // linkage and silently dropped the format.
 extern "C" IOService *native_gop_presenter_create(void);
@@ -1007,7 +1007,7 @@ void native_legacy_display_late_probe(void) {
 	// answer the post-restart passcode prompt. Opt-in through offline-key-events=1.
 	extern void native_keystore_probe(void);
 	native_keystore_probe();
-	// The CPU frequency vote (sheng-cpufreq=<n>) maps the EPSS domains and votes the top
+	// The CPU frequency vote (cpufreq=<n>) maps the EPSS domains and votes the top
 	// non-turbo level; it reports its state through native_cpufreq_row on the panel.
 	/* This file sits inside an extern "C" block to the end, so the declaration must not repeat
 	 * the linkage specifier: an extern "C" inside a function body there is a syntax error. */
@@ -1209,7 +1209,7 @@ void native_legacy_display_late_probe(void) {
 					 * display's node: a presenter attached under the display made SpringBoard find no
 					 * display and crash (sheng recorded that), so the placement is deliberate. */
 					unsigned gpu = 0;
-					if (PE_parse_boot_argn("sheng-fb-gpu", &gpu, sizeof gpu) && gpu == 1 && &native_gop_presenter_create) {
+					if (PE_parse_boot_argn("fb-gpu", &gpu, sizeof gpu) && gpu == 1 && &native_gop_presenter_create) {
 						IOService *handoff = native_gop_presenter_create();
 						IOService *home = IOService::getResourceService();
 						bool attached = false;

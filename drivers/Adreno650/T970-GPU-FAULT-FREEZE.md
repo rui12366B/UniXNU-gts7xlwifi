@@ -226,3 +226,77 @@ Changes:
   2026-11-09 07:24, appended to board.toml).
 - Limits: a freed BO whose Turnip slot was already reused by a new BO is not caught (its handle is valid). The kernel would then
   refuse at stage 6 (IOVA outside that handle's mapping), and `sf ... :6 ... h` names it.
+
+## main2: GPU userspace rebuilt from upstream UniXNU main (2026-11-11)
+
+Built in `sources/UniXNU-main` (t970-main): `.cache` set up from UniXNU-next (APFS clones). `mesa-work` reset to 85fda3b and the
+20-patch list applied. `metal2vulkan` moved to main's pin 555b13d (development). Then `build-turnip-darwin.py --target ios` and
+`build-adreno-metal-plugin.py --target ios --no-replay`.
+- `turnip-darwin-bo-retire-safe.patch` rebased onto main's darwin backend (submit cuts / render-mode turns): one hunk, the
+  `tu_darwin_queue_submit` struct, now also has `starts`. The patch validates.
+- `scripts/macho-self-bind-weak-imports.py` (new upstream post-link step) refused the arm64 iOS 17 Turnip ("no chained fixups":
+  it links with classic LC_DYLD_INFO_ONLY). Local change: it leaves such an image unchanged, as before the step existed.
+- `UniXNU-gts7xlwifi-next/scripts/t970-gpu-userspace-swap.py`: puts a plugin build into an existing addon (the bundle,
+  adrenoprobed, its job plist; the build's stand-in bluetoothd/iomfb jobs only where the addon has none) and appends the 3 CDHashes
+  to the trust.
+- Outputs (from bt9 e1f6a1db / trust 2dfd121e): `gpu.addon.main2` 06c91015…, `owner-gpu.trustcache.main2` 399db836…; CDHashes
+  plugin c13ca975…, adrenoprobed e22a279f…, Turnip 8b2ffa23….
+- Kernel ABI: drivers/Adreno740/NativeAdrenoABI.h (what Turnip compiles against) is identical to the device Adreno650 copy. The
+  handoff (0x7000-0x7003), export (0x7100) and trace (0x7102) selectors, NativeGpuTrace.h and the GOP wire header are identical too.
+  No kernel change is required.
+- Boot arguments the new plugin reads: `diag=1`, `gpu-trace=1`, `fb-bgra=1`, `swaptest=1`, `tu-debug=`, `wallpaper-freeze=1`,
+  `log-gpu=1`, `gpu-purge=0`, `gpu-ycbcr-planes=0`, `gpu-prime-system=0`, `metal-flow=`. The old `sheng-` forms are gone. Turnip's
+  own: `t970-bo-safe=`.
+- `pipa-turnip-debug=` / `pipa-tu=` only set the accelerator property NativeTurnipDebug, which no plugin reads (neither next's nor
+  main's), so `noubwc` has not applied since next2. UBWC has been on in every test since. Use `tu-debug=noubwc` (which also turns
+  on per-process Mesa log files) or an addon file `tu_debug` (/private/var/ngpu/tu_debug) to turn it off.
+- Main's plugin sets `tu_allow_concurrent_binning=true`. Turnip uses it only for chip >= 7, so it does nothing on the A650.
+
+## main2 stutter: GPU BOs on memory-outside pages got no cache maintenance (gpufault5, 2026-11-11)
+
+Log: logs/main2/alioth-000000000f5e5963 (main kernel + main2 userspace + `memory-outside=1 memory-outside-floor=0xd0000000`,
+195584 pages adopted).
+- 32 GPU restarts in 146 s (`rs 32/32`, all OK). The first came on backboardd's very first submissions (`sub 7/6` at ~50 s), each with a
+  CP_HW_ERROR interrupt storm (seen 900200, 4.59 M IRQs), stalled IBs reading 0 (`br ib1 @ffff000c: 0 0 ...`), and one CP read fault at
+  0xc4c7000. Older boots (no memory-outside) never failed on the first user jobs.
+- Cause in the driver: NativeAdrenoCpu.cpp treated every page outside [gPhysBase, gPhysBase+gPhysSize) as device memory.
+  `NativeAdrenoMaintainPhysicalPages` skipped it (no dc cvac/civac), `NativeAdrenoPagesUncached` called it never cached, and
+  `NativeAdrenoSetPagesCacheMode` / `NativeAdrenoReassertWriteCombined` refused it. memory-outside adopts DRAM below gPhysBase
+  (t970-memory-outside.patch: [vm_outside_first_phys, vm_outside_last_phys), adopted bits in vm_outside_valid, mapped by phystokv
+  through its own ptov entry). A user BO (pageable system memory, maintained per submission) on those pages kept its command words in
+  CPU caches, and the CP read zeroed or stale DRAM.
+- Fix: `NativeAdrenoKernelDram(pa)`: inside the gPhys span, or an adopted page of the outside range (weak references, so a kernel
+  without the patch behaves as before). Used by all four checks. The ownership bitmap (NativeAdrenoMemory.cpp) still covers only the
+  gPhys span; adopted pages are never "owned", which only relaxes the alias check.
+- Whether main's new Turnip adds hangs of its own (a) is not settled by this log. Boot without memory-outside, or with gpufault5, to
+  tell.
+
+## main5: silent SoC reset at the first rotation (gpufault6, 2026-11-11)
+
+Log: logs/main5/alioth-0000000010b06fa4. main5 is the first build whose UI rotates (T970Sensors.cpp fix). Twice the tablet reset at about
+88 s, right at the first 90° rotation, with no panic. The slot times run about 14 s behind msgbuf; the rotation is at 86.6 s uptime.
+- During the rotation: wired memory +109 k pages (427 MiB) in 2 s, GPU busy 772‰, fence-wait timeouts 23→413. The stalled job
+  (fence 546) runs a 256 KiB IB1 (`[ib] fence=546 bytes=262132`; main's Turnip packs large command streams) with 0xf5dd dwords still to
+  go, and RBBM_STATUS e61015 (GPU_BUSY set). The IB words are real packets (not zeros, so gpufault5 works). No SMMU fault.
+- `[gpu unstick] kick=5 drain=5 ... ended: drain=4`. Each of the rotation's long frames passed 200 ms, and the stall handler's stage 3
+  halted GBIF (client then arbiter) under a BUSY GPU. Four stalls ended after it; during the fifth the SoC reset. (`ack=1/3` is a complete
+  halt: the client bit, then both.) Linux halts GBIF only right before a reset or a power collapse, never on a working GPU.
+- main3/main4 ran 414/202 s with memory-outside on, so adopted memory is not the trigger here. The display path is unaffected:
+  CoreAnimation composites the rotation into the same 2800x1752 framebuffer, and validateSwap takes only full-frame untransformed swaps.
+- Fix (gpufault6): `NativeAdrenoRing::gpuBusy()` (RBBM_STATUS bit 23), and the stage-3 drain only when the GPU is idle (the missed-write-
+  pointer case it was written for). A busy stall is counted (`native_t970_drain_skipped`, row 28 `vb n dk n`). A busy GPU that never
+  finishes is left to the hangcheck's restart (GBIF drain + soft reset).
+- Not proven: the reset itself left no trace. To confirm, read the Samsung reset reason from TWRP after the next reset (AOP/TZ
+  sections, e.g. TZBSP_ERR_FATAL_NOC_ERROR) before anything else overwrites it.
+
+## main7: still resets at the first rotation with gpufault6 (gpufault7 bisect switch, 2026-11-11)
+
+Log: logs/main7/alioth-0000000021122efc. Same picture as main5 minus the drain:
+- At the rotation: wired +122 k pages (478 MiB) in 2 s, CPU cache maintenance 6.6 GB in 465 ms, GPU busy, battery -1032 mA, 66 °C.
+- `[gpu unstick] kick=5 ... drain=0`: five 50 ms kicks (TLBIALL of the GPU context bank plus a write-pointer rewrite) under a busy GPU
+  (RBBM_STATUS e61005, the CP progressing). No restart (row 28 plain), no fault.
+- Not memory pressure / adopted memory: main3/main4 ran with up to 2.2 GB wired and 2 MB free on memory-outside without a reset. The reset
+  happened at 1.4 GB wired, 2.3 GB free.
+- Left: the kick path (TLBIALL + WPTR under traffic), or power/thermal during the burst (GPU fixed at its top level, DDR voted max).
+gpufault7: boot arg `t970-gpu-unstick=0` turns the stall handler's kicks/drain off (the hangcheck still restarts a real hang).
+Bisect with existing args: `pipa-gpu-perf=4` (lower GPU level, less power), `pipa-ddr-vote=0` (DDR left at the UEFI level).

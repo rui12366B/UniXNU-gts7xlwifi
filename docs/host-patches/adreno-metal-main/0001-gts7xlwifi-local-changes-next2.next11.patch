@@ -1,15 +1,14 @@
-From 984504898ffbabda8aff041da8812c3b7a9f1ac9 Mon Sep 17 00:00:00 2001
-From: t970 <gts7xlwifi@users.noreply.github.com>
+From 49923616b39ccc71f4eb2ce1a26b087574a40ed0 Mon Sep 17 00:00:00 2001
+From: gts7xlwifi port <gts7xlwifi@users.noreply.github.com>
 Date: Wed, 4 Nov 2026 06:01:27 +0000
-Subject: [PATCH 1/7] gts7xlwifi: local changes (next2..next11)
+Subject: [PATCH 1/2] gts7xlwifi: local changes (next2..next11)
 
 ---
  GpuScanoutPresenter.h        | 41 ++++++++++++++++++++++--
- NativeAdrenoMetalPlugin.mm   |  2 +-
  NativeBridgeMetalFrontend.mm |  5 ++-
  bridge/NativeMetalObjects.rs |  5 +--
  shaders/scanout_convert.ll   | 62 +++++++++++++++++++++++++++++++++++-
- 5 files changed, 108 insertions(+), 7 deletions(-)
+ 4 files changed, 107 insertions(+), 6 deletions(-)
 
 diff --git a/GpuScanoutPresenter.h b/GpuScanoutPresenter.h
 index 8c64a98..f3b56dd 100644
@@ -77,24 +76,11 @@ index 8c64a98..f3b56dd 100644
      id<MTLBuffer> tables_[2] = {nil, nil};
      Source sources_[kSources] = {};
      uint64_t uses_ = 0;
-diff --git a/NativeAdrenoMetalPlugin.mm b/NativeAdrenoMetalPlugin.mm
-index 415e9c8..f24ab9b 100644
---- a/NativeAdrenoMetalPlugin.mm
-+++ b/NativeAdrenoMetalPlugin.mm
-@@ -96,7 +96,7 @@ static bool bootArgSet(const char *key) {
-     size_t size = sizeof args - 1;
-     return sysctlbyname("kern.bootargs", args, &size, nullptr, 0) == 0 && strstr(args, key);
- }
--static unsigned patchFramebufferBranch(uintptr_t slide) {
-+__attribute__((unused)) static unsigned patchFramebufferBranch(uintptr_t slide) {  // iPadOS 27 addresses: unused in the ios (17) build
-     const uintptr_t site = 0x184461928 + slide;
-     uint32_t word = 0;
-     if (!readTask(site, &word, sizeof word)) return 0x6E40;
 diff --git a/NativeBridgeMetalFrontend.mm b/NativeBridgeMetalFrontend.mm
-index aec500d..bd1ecbd 100644
+index 2c8d0fe..bff54c7 100644
 --- a/NativeBridgeMetalFrontend.mm
 +++ b/NativeBridgeMetalFrontend.mm
-@@ -4506,7 +4506,10 @@ static void installAnswers(Class cls) {
+@@ -4862,7 +4862,10 @@ static void installAnswers(Class cls) {
     // Extended-range 10-bit (XR10) framebuffers are withheld: this display chain presents 8-bit BGRX scanout only. The render server picks its
     // wide-gamut 64-bit (and Apple-compressed) framebuffer when a device offers them, and the display driver could not show it (int-089: the
     // swap's surface was '&w4a', 8 bytes per pixel, and every swap was refused).
@@ -107,10 +93,10 @@ index aec500d..bd1ecbd 100644
     class_addMethod(cls,sel,kind==NMB_ANSWER_COUNT?(IMP)countAnswer:(IMP)flagAnswer,kind==NMB_ANSWER_COUNT?"Q16@0:8":"B16@0:8");
     break;
 diff --git a/bridge/NativeMetalObjects.rs b/bridge/NativeMetalObjects.rs
-index ccea667..0bc7763 100644
+index fc426e4..4fac142 100644
 --- a/bridge/NativeMetalObjects.rs
 +++ b/bridge/NativeMetalObjects.rs
-@@ -527,8 +527,9 @@ const PUBLIC_ANSWERS: &[(&str, u32)] = &[
+@@ -851,8 +851,9 @@ const PUBLIC_ANSWERS: &[(&str, u32)] = &[
      ("argumentBuffersSupport", 0),
      ("readWriteTextureSupport", 0),
      ("maxColorAttachments", 0),

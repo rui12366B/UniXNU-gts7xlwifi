@@ -202,7 +202,46 @@ Order: front S5K4HA first (fewest extras: no actuator, no flash, CSIPHY 3, 8 MP)
     26c002 sites 56383756 svc 1 uc 0 ae 0`: 13.1 fps delivered (every other sensor frame), no timeouts, AE held at 2526 lines / 2.5x,
     service published. Sites (y0x0) 86, (y0x1) 55, (y1x0) 56, (y1x1) 86: green on the (0,0)/(1,1) diagonal, so GRBG or GBRG.
   - Option `t970-camera-bin=1`: SMIA 2x2 binning (0x0900/0x0901) to 1640x1232 before the setup is read; untested on the S5K4HA.
-  - **C5d later:** a viewer app (IOSurface + Metal debayer) and then whether iPadOS 17's external-camera (UVC/CMIO extension) path
+  - **C6 (in source, 2026-11-11): the front camera as a CoreMediaIO camera extension -> AVFoundation external camera.** The 21H461
+    image has no H9 ISP to feed and no UVCAssistant (j120 is Lightning), but the system pieces are all there: mediaserverd's
+    BWFigCaptureDeviceVendor (CMCapture) is built with a CMIO extension discovery session (`_updateCMIOExtensionDevices`,
+    `CMIOExtensionFigCaptureStream`), CoreMediaIO exports the full CMIOExtension API (provider/device/stream classes, iOS SDK .tbd), and
+    com.apple.mediaserverd.plist publishes the launchd event stream `com.apple.cmio.registerassistantservice.system-extensions.matching`.
+    A provider is exactly what macOS ships for its built-in cameras (appleh13camerad, cameracaptured, UVCAssistant launchd plists): a
+    job subscribed to that stream with `CMIOExtensionBundleIdentifier`, a Mach service of the same name, and
+    `CMIOExtension/CMIOExtensionMachServiceName` in the embedded Info.plist; `+[CMIOExtensionProvider startServiceWithProvider:]`.
+    - `tools/t970camerad/t970camerad.m`: provider + device ("T970 Front Camera", transport 'usb ') + stream, formats 1280x720 (centre
+      crop) and 1640x1232, 420v IOSurface pixel buffers; on stream start it calls T970CameraStart, takes frames tear-free, debayers
+      GRBG (black 16, gray world, gamma 2.2, BT.601 video range) and sends them with the kernel's done timestamps (~13 fps).
+      Reports stage bits to the kernel (new selector T970CameraReport -> `[t970 camera c5] ... d <d0> <d1> <frames> <error>`).
+    - `scripts/build-t970camerad.py`: builds against the macOS SDK's CoreMediaIO headers (iOS has only the .tbd), one signed binary
+      per identity (org.unixnu.t970camerad = d0, com.apple.cmio.uvcassistantextension = d1, in case mediaserverd only accepts the
+      UVC provider name), adds RunAtLoad/KeepAlive root jobs with the LaunchEvents subscription to the BlueTool script's launchd
+      cache, addon cam-bin/ + wifi-xpc/, trust module. Exec paths added to t970-wifi-service-mount.patch's exemption list.
+    - d0/d1 stage bits: 1 started, 2 kernel service open, 4 provider service started, 8 device registered, 0x10 host connected
+      (mediaserverd discovered it), 0x20 stream start requested, 0x40 kernel streaming, 0x80 first frame sent, 0x100 stopped,
+      0x200 host disconnected; slot in bits 28+. Logs: /private/var/log/t970camerad(-uvc).log (exported by BootDiagExport.c).
+    - **main5b (2026-11-11, cam1 addon, t970-camera=513):** `d 1f 1000001f 0 0`: both identities started, opened the kernel
+      service, registered, and mediaserverd (pid 29) connected to both (logs: "client connected: pid 29"). No stream was ever
+      requested: FaceTime showed black and offers no camera switch on this iPad. CoreMediaIO's device properties (13 exported on
+      21H461) have no position/built-in flag, so a CMIO device can only be an *external* camera (AVCaptureDeviceTypeExternal,
+      position unspecified); built-in front/back positions come from mediaserverd's default (H9 ISP) device. AVFCapture also knows
+      an app Info.plist key `NSCameraUseExternalDeviceType`; no app on the 21H461 image declares it.
+    - **C6b (in source): AVFoundation probe inside the daemon** (`-p 25`, first identity): 25 s after start it lists the cameras
+      AVFoundation offers (log lines, `[17]`), then runs an AVCaptureSession + VideoDataOutput (BGRA) on our device for 6 s (so
+      mediaserverd starts our stream exactly as an app would), counts frames (`[18]`) and writes the first frame to
+      /private/var/log/t970camerad-avf.bmp (exported). Entitlements from 21H461 CMCapture: capture.allow, nonstandard-client.allow
+      (+ allowed-media-types), background-camera-access, tcc.allow kTCCServiceCamera. Row: `... p <stage> <devices> <frames>`;
+      stage 1 started, 2 listed, 4 ours listed, 8 input, 0x10 running, 0x20 first frame, 0x40 BMP, 0x80 done, | type << 8 (1
+      external, 2 built-in); devices = total | built-in << 8 | external << 16 | ours << 24.
+    - **C7 plan (built-in front camera for Camera/FaceTime/Control Center):** once C6b shows frames through AVFoundation, make
+      mediaserverd present our CMIO device as the built-in front camera. That logic lives in CMCapture (dyld shared cache), so the
+      route is a re-signed copy of mediaserverd with an added LC_LOAD_DYLIB (as the BT work re-signs bluetoothd and points its job
+      at /private/var/ngpu) loading a small dylib that hooks BWFigCaptureDeviceVendor / FigCaptureSource creation to map position
+      front + builtInWideAngleCamera onto our device. Alternative: emulate AppleH9CamIn (much larger).
+ (FaceTime's camera menu, Safari getUserMedia, AVCaptureDevice
+      .external). The Camera app and Control Center use only built-in cameras and stay black.
+ a viewer app (IOSurface + Metal debayer) and then whether iPadOS 17's external-camera (UVC/CMIO extension) path
     can host a virtual camera fed by the service, so AVFoundation apps see it (route 4.A.6 b).
 
 Risks: the S5K3M5 PDAF and actuator (0x0c on CCI1 m1) and the flash come later. CCI1 m1 also holds the EEPROMs (0xa0/0xa2/0xb0),

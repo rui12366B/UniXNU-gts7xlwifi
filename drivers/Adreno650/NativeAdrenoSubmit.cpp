@@ -4,6 +4,7 @@
 #include "NativeAdrenoSubmit.h"
 #include "AdrenoPM4.h"
 #include <IOKit/IOLib.h>
+extern "C" boolean_t PE_parse_boot_argn(const char *arg_string,void *arg_ptr,int max_arg);
 
 /* CP_INDIRECT_BUFFER is opcode 0x3f with a 3-word payload: 64-bit GPU address
  * and IB_SIZE in dwords (bits 0..19), exactly as the pinned adreno_pm4.xml
@@ -75,7 +76,7 @@ extern "C" {volatile uint32_t native_adreno_recover_trace[4];}
  * the submitting pid << 32, [5] when the driver saw the job retired (us, the submission clock), [6] ring | (priority + 1) << 4 | GPU role << 8 |
  * ring the CP ran at submit << 16 | switch in flight << 20 | restarts that replayed it << 24, [7] when it was last replayed (us, 0 never).
  * native_adreno_tl_count is the total. */
-/* sheng-diag=1, set by the service before any client attaches: the driver's diagnostics (the jobs' timeline, the CP stamps) run only then. */
+/* diag=1, set by the service before any client attaches: the driver's diagnostics (the jobs' timeline, the CP stamps) run only then. */
 extern "C" {volatile uint32_t native_adreno_diag;}
 extern "C" {volatile uint64_t (*native_adreno_tl)[8]=nullptr;volatile uint32_t native_adreno_tl_cap=0;volatile uint32_t native_adreno_tl_count;}
 /* The stall handler's actions (the newest 32): [0] time (us), [1] fence, [2] event (1 write pointer given again and translations dropped, 3 bus drain,
@@ -109,7 +110,7 @@ IOReturn NativeAdrenoSubmit::attach(NativeAdrenoVm *vm,NativeAdrenoRing *ring)
     if(attached_ || poisoned_ || vm_ || ring_)return kIOReturnBusy;
     if(!vm || !ring || vm->poisoned() || ring->poisoned())return kIOReturnBadArgument;
     vm_=vm;ring_=ring;rings_[0]=ring;ring_count_=1;attached_=true;stats_={};table_vm_=vm;
-    if(!native_adreno_tl && native_adreno_diag) {   /* the jobs' timeline is a diagnostic (sheng-diag=1) */
+    if(!native_adreno_tl && native_adreno_diag) {   /* the jobs' timeline is a diagnostic (diag=1) */
         const uint32_t cap=16384;
         volatile uint64_t (*memory)[8]=(volatile uint64_t (*)[8])IOMallocZero(sizeof(uint64_t)*8*cap);
         if(memory) {native_adreno_tl=memory;native_adreno_tl_cap=cap;}
@@ -127,6 +128,8 @@ IOReturn NativeAdrenoSubmit::setTableSwitching(unsigned mode,IOReturn (*write)(v
     }
     return kIOReturnSuccess;
 }
+/* gts7xlwifi gpufault6: [0] stalls whose bus drain was skipped because the GPU was busy, [1] the latest such fence. */
+extern "C" {volatile uint32_t native_t970_drain_skipped[2];}
 /* gts7xlwifi gpufault2: [0] table switches that found the GPU still busy after 2 s and answered kIOReturnBusy. */
 extern "C" {volatile uint32_t native_t970_usevm_busy[2];}
 /* Makes vm the table the GPU runs for the next submission. Mode 1: once every earlier job has finished, the CPU writes TTBR0 (the bank
@@ -643,14 +646,24 @@ void NativeAdrenoSubmit::noteStall(uint32_t observed,const NativeAdrenoRingClock
      * 5 ms against 1 ms waits, so most "stalls" are ordinary jobs still running; the write pointer is never dropped (fenced writes saw no
      * drop) and invalidating at map time changed nothing. i553: the handler ran on 6712 of 6911 jobs. It now waits for 50 ms without
      * progress, measured in time (a timed-out wait is one poll, 100 us or less), and so does the snapshot below. */
-    if(now && stage_due(stall_stage,0,pending,50000)) {
+    /* gts7xlwifi gpufault7: t970-gpu-unstick=0 leaves a stalled job alone (no TLBIALL, no write-pointer kick, no drain): only the hangcheck acts.
+     * A bisect switch for the reset at the first rotation (main5/main7: the GPU busy in long frames, kicked five times, then a silent reset). */
+    static int unstick=-1;
+    if(unstick<0) {unsigned value=1;PE_parse_boot_argn("t970-gpu-unstick",&value,sizeof value);unstick=value?1:0;}
+    const bool act=unstick!=0;
+    if(act && now && stage_due(stall_stage,0,pending,50000)) {
         native_adreno_unstick[0]=native_adreno_unstick[0]+1;native_adreno_unstick[1]=stall_fence;stall_stage=1;
         const uint32_t r0=stalled->readPointer(),w0=stalled->writePointer()&0xffff;
         (void)vm_->invalidateTlb();(void)stalled->kick();
         log(stall_fence,1,pending,r0&0xffff,w0);
     }
     /* Still stopped well after that: the way a6xx drains the bus before a reset, which lets a write that was never acknowledged end. */
-    if(now && stage_due(stall_stage,1,pending,200000)) {
+    /* gts7xlwifi gpufault6: only an idle GPU's bus is drained. main5 reset the SoC at its first rotation: frames of the rotation ran past
+     * 200 ms in 256 KiB IBs with the GPU busy (RBBM_STATUS e61015), the drain halted GBIF under them five times, and the fifth ended in a
+     * silent reset. Linux halts GBIF only before a reset or a power collapse. A busy GPU that never finishes is the hangcheck's to restart. */
+    if(act && now && stage_due(stall_stage,1,pending,200000) && stalled->gpuBusy()) {
+        if(native_t970_drain_skipped[1]!=stall_fence) {native_t970_drain_skipped[0]=native_t970_drain_skipped[0]+1;native_t970_drain_skipped[1]=stall_fence;}
+    } else if(act && now && stage_due(stall_stage,1,pending,200000)) {
         uint32_t ack[2]={};
         native_adreno_unstick[4]=native_adreno_unstick[4]+1;native_adreno_unstick[7]=stall_fence;stall_stage=3;
         const uint32_t r0=stalled->readPointer(),w0=stalled->writePointer()&0xffff;
